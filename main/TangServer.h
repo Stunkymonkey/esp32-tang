@@ -6,7 +6,7 @@
 #include <WebServer.h>
 #include <ArduinoJson.h>
 #include <EEPROM.h>
-#include <Base64.h>
+#include <base64.h>
 #include "CertHelper.h"
 
 // --- Compile-time Configuration ---

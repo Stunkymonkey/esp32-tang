@@ -14,9 +14,10 @@
 // Define the task handle for the Arduino loop
 TaskHandle_t arduinoTaskHandle = NULL;
 
+#if !CONFIG_AUTOSTART_ARDUINO
 /**
  * @brief The FreeRTOS task that will run the Arduino setup and loop.
- * * @param pvParameters Unused.
+ * @param pvParameters Unused.
  */
 void arduinoTask(void *pvParameters) {
     // Call the Arduino setup function
@@ -49,3 +50,4 @@ extern "C" void app_main(void) {
       &arduinoTaskHandle // Task handle to keep track of the created task
     );
 }
+#endif
