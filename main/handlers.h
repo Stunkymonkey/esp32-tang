@@ -5,7 +5,7 @@
 
 void handleAdv() {
     if (!is_active) {
-        server_https.send(403, "text/plain", "Server not active");
+        server_http.send(403, "text/plain", "Server not active");
         return;
     }
     DEBUG_PRINTLN("Received request for /adv");
@@ -23,17 +23,17 @@ void handleAdv() {
 
     String response;
     serializeJson(doc, response);
-    server_https.send(200, "application/json", response);
+    server_http.send(200, "application/json", response);
     DEBUG_PRINTLN("Sent public key advertisement.");
 }
 
 void handleRec() {
     if (!is_active) {
-        server_https.send(403, "text/plain", "Server not active");
+        server_http.send(403, "text/plain", "Server not active");
         return;
     }
     // The ECMR operation is complex and not implemented here.
-    server_https.send(501, "text/plain", "Not Implemented: ECMR key recovery is not supported.");
+    server_http.send(501, "text/plain", "Not Implemented: ECMR key recovery is not supported.");
 }
 
 
@@ -51,19 +51,19 @@ void handlePub() {
 
     String response;
     serializeJson(doc, response);
-    server_https.send(200, "application/json", response);
+    server_http.send(200, "application/json", response);
 }
 
 void handleActivate() {
     if (is_active) {
-        server_https.send(400, "text/plain", "Already active");
+        server_http.send(400, "text/plain", "Already active");
         return;
     }
-    if (!server_https.hasArg("plain")) {
-        server_https.send(400, "text/plain", "Bad Request: Missing body");
+    if (!server_http.hasArg("plain")) {
+        server_http.send(400, "text/plain", "Bad Request: Missing body");
         return;
     }
-    String body = server_https.arg("plain");
+    String body = server_http.arg("plain");
 
     DynamicJsonDocument reqDoc(1024);
     deserializeJson(reqDoc, body);
@@ -76,7 +76,7 @@ void handleActivate() {
 
     uint8_t shared_secret[32];
     if (!compute_ecdh_shared_secret(eph_pub_key, admin_private_key, shared_secret)) {
-        server_https.send(500, "text/plain", "Activation ECDH failed");
+        server_http.send(500, "text/plain", "Activation ECDH failed");
         return;
     }
 
@@ -99,12 +99,12 @@ void handleActivate() {
     uint8_t password_buf[65] = {0}; // Max password length + null terminator
     int decoded_len = base64_url_decode(ciphertext_b64, password_buf, sizeof(password_buf));
     if (decoded_len < 0) {
-        server_https.send(400, "text/plain", "Bad Request: Invalid ciphertext encoding");
+        server_http.send(400, "text/plain", "Bad Request: Invalid ciphertext encoding");
         return;
     }
 
     if (!jwe_gcm_decrypt(password_buf, decoded_len, cek, sizeof(cek), iv_buf, sizeof(iv_buf), tag_buf, sizeof(tag_buf), (const uint8_t*)protected_header_b64, strlen(protected_header_b64))) {
-        server_https.send(401, "text/plain", "JWE decryption failed: invalid message or tag");
+        server_http.send(401, "text/plain", "JWE decryption failed: invalid message or tag");
         return;
     }
 
@@ -123,26 +123,26 @@ void handleActivate() {
         is_active = true;
         activation_timestamp = millis();
         DEBUG_PRINTLN("Server ACTIVATED.");
-        server_https.send(200, "text/plain", "Server activated successfully");
+        server_http.send(200, "text/plain", "Server activated successfully");
     } else {
         DEBUG_PRINTLN("GCM tag check failed for local key! Invalid password.");
-        server_https.send(401, "text/plain", "Activation failed: invalid password for stored key");
+        server_http.send(401, "text/plain", "Activation failed: invalid password for stored key");
     }
 }
 
 void handleDeactivate() {
-    if (server_https.method() == HTTP_GET) {
+    if (server_http.method() == HTTP_GET) {
         deactivate_server();
-        server_https.send(200, "text/plain", "Server deactivated");
+        server_http.send(200, "text/plain", "Server deactivated");
         return;
     }
 
-    if (server_https.method() == HTTP_POST) {
+    if (server_http.method() == HTTP_POST) {
         if (!is_active) {
-            server_https.send(400, "text/plain", "Already inactive");
+            server_http.send(400, "text/plain", "Already inactive");
             return;
         }
-        String body = server_https.arg("plain");
+        String body = server_http.arg("plain");
         DynamicJsonDocument reqDoc(1024);
         deserializeJson(reqDoc, body);
 
@@ -153,7 +153,7 @@ void handleDeactivate() {
 
         uint8_t shared_secret[32];
         if (!compute_ecdh_shared_secret(eph_pub_key, admin_private_key, shared_secret)) {
-            server_https.send(500, "text/plain", "Deactivation ECDH failed");
+            server_http.send(500, "text/plain", "Deactivation ECDH failed");
             return;
         }
 
@@ -169,12 +169,12 @@ void handleDeactivate() {
         uint8_t password_buf[65] = {0};
         int decoded_len = base64_url_decode(reqDoc["ciphertext"].as<String>(), password_buf, sizeof(password_buf));
         if (decoded_len < 0) {
-            server_https.send(400, "text/plain", "Bad Request: Invalid ciphertext encoding");
+            server_http.send(400, "text/plain", "Bad Request: Invalid ciphertext encoding");
             return;
         }
 
         if (!jwe_gcm_decrypt(password_buf, decoded_len, cek, sizeof(cek), iv_buf, sizeof(iv_buf), tag_buf, sizeof(tag_buf), (const uint8_t*)protected_header_b64, strlen(protected_header_b64))) {
-            server_https.send(401, "text/plain", "JWE decryption failed for new password");
+            server_http.send(401, "text/plain", "JWE decryption failed for new password");
             return;
         }
 
@@ -192,12 +192,12 @@ void handleDeactivate() {
 
         DEBUG_PRINTLN("New encrypted Tang key saved to EEPROM.");
         deactivate_server();
-        server_https.send(200, "text/plain", "Key saved and server deactivated");
+        server_http.send(200, "text/plain", "Key saved and server deactivated");
     }
 }
 
 void handleWifiConfig() {
-    String body = server_https.arg("plain");
+    String body = server_http.arg("plain");
     DynamicJsonDocument doc(256);
     deserializeJson(doc, body);
 
@@ -205,7 +205,7 @@ void handleWifiConfig() {
     const char* new_pass = doc["password"];
 
     if (!new_ssid) {
-        server_https.send(400, "text/plain", "SSID is required");
+        server_http.send(400, "text/plain", "SSID is required");
         return;
     }
 
@@ -222,19 +222,19 @@ void handleWifiConfig() {
 
     EEPROM.commit();
 
-    server_https.send(200, "text/plain", "Wi-Fi credentials saved. Restarting...");
+    server_http.send(200, "text/plain", "Wi-Fi credentials saved. Restarting...");
     delay(1000);
     ESP.restart();
 }
 
 void handleReboot() {
-    server_https.send(200, "text/plain", "Rebooting...");
+    server_http.send(200, "text/plain", "Rebooting...");
     delay(1000);
     ESP.restart();
 }
 
 void handleNotFound() {
-    server_https.send(404, "text/plain", "Not found");
+    server_http.send(404, "text/plain", "Not found");
 }
 
 void handleHttpRedirect() {

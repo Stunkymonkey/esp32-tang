@@ -27,8 +27,8 @@
 // --- Wi-Fi Configuration ---
 char wifi_ssid[33] = "YOUR_WIFI_SSID";
 char wifi_password[65] = "YOUR_WIFI_PASSWORD";
-enum WifiMode { WIFI_STA, WIFI_AP };
-WifiMode current_wifi_mode = WIFI_STA;
+enum WifiMode { TANG_WIFI_STA, TANG_WIFI_AP };
+WifiMode current_wifi_mode = TANG_WIFI_STA;
 unsigned long mode_switch_timestamp = 0;
 const unsigned long WIFI_MODE_DURATION = 60000; // 60 seconds
 
@@ -104,8 +104,9 @@ void setup() {
         // Load SSL certificate and key PEM strings from EEPROM
         EEPROM.get(EEPROM_CERT_ADDR, cert_buf);
         EEPROM.get(EEPROM_CERT_KEY_ADDR, key_buf);
-        server_https.setServerKeyAndCert_P(key_buf, cert_buf);
-        DEBUG_PRINTLN("Loaded SSL certificate and key from EEPROM.");
+        // TODO: Implement HTTPS server with proper SSL library
+        // server_https.setServerKeyAndCert_P(key_buf, cert_buf);
+        DEBUG_PRINTLN("Loaded SSL certificate and key from EEPROM (HTTPS disabled for now).");
 
     } else {
         DEBUG_PRINTLN("First run or NUKE'd: generating and saving new keys and certificate...");
@@ -128,8 +129,9 @@ void setup() {
         for(int i=0; i < 2048; i++) EEPROM.write(EEPROM_CERT_ADDR + i, cert_buf[i]);
         for(int i=0; i < 2048; i++) EEPROM.write(EEPROM_CERT_KEY_ADDR + i, key_buf[i]);
 
-        server_https.setServerKeyAndCert_P(key_buf, cert_buf);
-        DEBUG_PRINTLN("Generated and saved new SSL certificate.");
+        // TODO: Implement HTTPS server with proper SSL library
+        // server_https.setServerKeyAndCert_P(key_buf, cert_buf);
+        DEBUG_PRINTLN("Generated and saved new SSL certificate (HTTPS disabled for now).");
 
         // 4. Write magic number and commit
         EEPROM.put(EEPROM_MAGIC_ADDR, EEPROM_MAGIC_VALUE);
@@ -146,23 +148,21 @@ void setup() {
     startSTAMode();
 
     // --- Setup Server Routes ---
-    // HTTPS routes (main application)
-    server_https.on("/adv", HTTP_GET, handleAdv);
-    server_https.on("/rec", HTTP_POST, handleRec);
-    server_https.on("/pub", HTTP_GET, handlePub);
-    server_https.on("/activate", HTTP_POST, handleActivate);
-    server_https.on("/deactivate", HTTP_GET, handleDeactivate); // Simple deactivate
-    server_https.on("/deactivate", HTTP_POST, handleDeactivate); // Deactivate and set new password
-    server_https.on("/wifi", HTTP_POST, handleWifiConfig);
-    server_https.on("/reboot", HTTP_GET, handleReboot);
-    server_https.onNotFound(handleNotFound);
+    // HTTP routes (temporarily using HTTP instead of HTTPS)
+    server_http.on("/adv", HTTP_GET, handleAdv);
+    server_http.on("/rec", HTTP_POST, handleRec);
+    server_http.on("/pub", HTTP_GET, handlePub);
+    server_http.on("/activate", HTTP_POST, handleActivate);
+    server_http.on("/deactivate", HTTP_GET, handleDeactivate); // Simple deactivate
+    server_http.on("/deactivate", HTTP_POST, handleDeactivate); // Deactivate and set new password
+    server_http.on("/wifi", HTTP_POST, handleWifiConfig);
+    server_http.on("/reboot", HTTP_GET, handleReboot);
+    server_http.onNotFound(handleNotFound);
 
-    // HTTP server just redirects to HTTPS
-    server_http.onNotFound(handleHttpRedirect);
-
-    server_https.begin();
+    // TODO: Setup HTTPS server with proper SSL library
+    // server_https.begin();
     server_http.begin();
-    DEBUG_PRINTLN("HTTPS server listening on port 443.");
+    DEBUG_PRINTLN("HTTP server listening on port 80 (HTTPS temporarily disabled).");
     DEBUG_PRINTLN("HTTP redirect server listening on port 80.");
     if (!is_active) {
         DEBUG_PRINTLN("Server is INACTIVE. POST to /activate to enable Tang services.");
@@ -192,13 +192,13 @@ void loop() {
     // --- Wi-Fi Connection Management ---
     if (WiFi.status() != WL_CONNECTED) {
         if (millis() - mode_switch_timestamp > WIFI_MODE_DURATION) {
-            if (current_wifi_mode == WIFI_STA) {
+            if (current_wifi_mode == TANG_WIFI_STA) {
                 startAPMode();
             } else {
                 startSTAMode();
             }
         }
-        if (current_wifi_mode == WIFI_STA) {
+        if (current_wifi_mode == TANG_WIFI_STA) {
             // Print a dot every so often while trying to connect
             if ((millis() % 2000) < 50) DEBUG_PRINT(".");
         }
@@ -210,9 +210,9 @@ void loop() {
         deactivate_server();
     }
 
-    // --- Handle Web Requests ---
-    server_https.handleClient();
     server_http.handleClient();
+    // TODO: Handle HTTPS client connections
+    // server_https.handleClient();
 }
 
 // --- WiFi Mode Management ---
@@ -221,7 +221,7 @@ void startAPMode() {
     WiFi.softAP("Tang-Server-Setup", NULL);
     DEBUG_PRINTLN("\nStarting Access Point 'Tang-Server-Setup'.");
     DEBUG_PRINTF("AP IP address: %s\n", WiFi.softAPIP().toString().c_str());
-    current_wifi_mode = WIFI_AP;
+    current_wifi_mode = TANG_WIFI_AP;
     mode_switch_timestamp = millis();
 }
 
@@ -233,9 +233,8 @@ void startSTAMode() {
     } else {
         DEBUG_PRINTLN("\nNo WiFi SSID configured. Skipping connection attempt.");
     }
-    current_wifi_mode = WIFI_STA;
+    current_wifi_mode = TANG_WIFI_STA;
     mode_switch_timestamp = millis();
 }
-
 
 #endif // TANG_SERVER_H
