@@ -1,0 +1,26 @@
+menu "Wi-Fi Credentials"
+
+config WIFI_SSID
+    string "Wi-Fi SSID"
+    default "myssid"
+    help
+        SSID of the Wi-Fi network to connect to.
+
+config WIFI_PASSWORD
+    string "Wi-Fi Password"
+    default "mypassword"
+    help
+        Password for the Wi-Fi network.
+
+endmenu
+
+
+menu "Tang Server Configuration"
+
+config INITIAL_TANG_PASSWORD
+    string "Initial Tang Password"
+    default "change-me"
+    help
+        Initial password used by the Tang server to derive secrets.
+
+endmenu

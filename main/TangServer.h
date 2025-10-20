@@ -8,6 +8,7 @@
 #include <EEPROM.h>
 #include <base64.h>
 #include "CertHelper.h"
+#include "sdkconfig.h"
 
 // --- Compile-time Configuration ---
 // Comment out this line to disable all Serial output for a "release" build.
@@ -25,15 +26,15 @@
 #endif
 
 // --- Wi-Fi Configuration ---
-char wifi_ssid[33] = "YOUR_WIFI_SSID";
-char wifi_password[65] = "YOUR_WIFI_PASSWORD";
+const char* wifi_ssid = CONFIG_WIFI_SSID;
+const char* wifi_password = CONFIG_WIFI_PASSWORD;
 enum WifiMode { TANG_WIFI_STA, TANG_WIFI_AP };
 WifiMode current_wifi_mode = TANG_WIFI_STA;
 unsigned long mode_switch_timestamp = 0;
 const unsigned long WIFI_MODE_DURATION = 60000; // 60 seconds
 
 // --- Initial Setup Configuration ---
-const char* initial_tang_password = "change-this-password";
+const char* initial_tang_password = CONFIG_INITIAL_TANG_PASSWORD;
 
 // --- Server & Crypto Globals ---
 WebServer server_http(80);
