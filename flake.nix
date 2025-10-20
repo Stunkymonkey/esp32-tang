@@ -93,10 +93,10 @@
             # Check for serial devices
             if ls /dev/ttyUSB* >/dev/null 2>&1; then
               echo "📡 Found USB serial devices:"
-              ls -la /dev/ttyUSB* 2>/dev/null | head -3
+              ls -la /dev/ttyUSB* 2>/dev/null
             elif ls /dev/ttyACM* >/dev/null 2>&1; then
               echo "📡 Found ACM serial devices:"
-              ls -la /dev/ttyACM* 2>/dev/null | head -3
+              ls -la /dev/ttyACM* 2>/dev/null
             else
               echo "📡 No serial devices found. Connect your ESP32 board."
             fi
@@ -114,6 +114,9 @@
             echo "Ready for ESP32 development with Arduino support! 🎯"
             echo
           '';
+
+          # allow /dev/ access
+          extraDevPaths = [ "/dev/ttyUSB*" "/dev/ttyACM*" ];
 
           # Environment variables
           IDF_TOOLS_PATH = "$HOME/.espressif";
@@ -135,7 +138,6 @@
 
           buildInputs = with pkgs; [
             esp-idf-full
-            git
             picocom
           ];
 
@@ -149,6 +151,8 @@
             export CCACHE_DIR="$HOME/.ccache"
             mkdir -p "$CCACHE_DIR"
           '';
+
+          extraDevPaths = [ "/dev/ttyUSB*" "/dev/ttyACM*" ];
         };
       }
     );
