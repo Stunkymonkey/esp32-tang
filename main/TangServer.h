@@ -156,7 +156,6 @@ void setup() {
     server_http.on("/activate", HTTP_POST, handleActivate);
     server_http.on("/deactivate", HTTP_GET, handleDeactivate); // Simple deactivate
     server_http.on("/deactivate", HTTP_POST, handleDeactivate); // Deactivate and set new password
-    server_http.on("/wifi", HTTP_POST, handleWifiConfig);
     server_http.on("/reboot", HTTP_GET, handleReboot);
     server_http.onNotFound(handleNotFound);
 

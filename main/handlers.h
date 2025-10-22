@@ -196,37 +196,6 @@ void handleDeactivate() {
     }
 }
 
-void handleWifiConfig() {
-    String body = server_http.arg("plain");
-    DynamicJsonDocument doc(256);
-    deserializeJson(doc, body);
-
-    const char* new_ssid = doc["ssid"];
-    const char* new_pass = doc["password"];
-
-    if (!new_ssid) {
-        server_http.send(400, "text/plain", "SSID is required");
-        return;
-    }
-
-    DEBUG_PRINTLN("Received new Wi-Fi configuration.");
-    DEBUG_PRINTF("SSID: %s\n", new_ssid);
-
-    for (int i=0; i < 33; i++) EEPROM.write(EEPROM_WIFI_SSID_ADDR + i, 0);
-    for (int i=0; i < strlen(new_ssid); i++) EEPROM.write(EEPROM_WIFI_SSID_ADDR + i, new_ssid[i]);
-
-    for (int i=0; i < 65; i++) EEPROM.write(EEPROM_WIFI_PASS_ADDR + i, 0);
-    if(new_pass) {
-        for (int i=0; i < strlen(new_pass); i++) EEPROM.write(EEPROM_WIFI_PASS_ADDR + i, new_pass[i]);
-    }
-
-    EEPROM.commit();
-
-    server_http.send(200, "text/plain", "Wi-Fi credentials saved. Restarting...");
-    delay(1000);
-    ESP.restart();
-}
-
 void handleReboot() {
     server_http.send(200, "text/plain", "Rebooting...");
     delay(1000);
