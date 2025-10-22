@@ -42,12 +42,12 @@ extern "C" void app_main(void) {
     // This isolates the Arduino environment and allows it to run alongside
     // other IDF components or tasks.
     xTaskCreate(
-      arduinoTask,       // Function to implement the task
-      "arduino_task",    // Name of the task
-      8192,              // Stack size in words
-      NULL,              // Task input parameter
-      1,                 // Priority of the task
-      &arduinoTaskHandle // Task handle to keep track of the created task
+      arduinoTask,                    // Function to implement the task
+      "arduino_task",                 // Name of the task
+      CONFIG_ARDUINO_LOOP_STACK_SIZE, // Stack size in words
+      NULL,                           // Task input parameter
+      1,                              // Priority of the task
+      &arduinoTaskHandle              // Task handle to keep track of the created task
     );
 }
 #endif
