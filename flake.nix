@@ -19,6 +19,8 @@
           buildInputs = with pkgs; [
             # ESP-IDF with full toolchain
             esp-idf-full
+            jose
+            clevis
 
             # Development tools
             gnumake
