@@ -1,15 +1,16 @@
 #ifndef HELPERS_H
 #define HELPERS_H
 
-#include "mbedtls/entropy.h"
-#include "mbedtls/ctr_drbg.h"
-#include "mbedtls/sha256.h"
-#include "mbedtls/gcm.h"
-#include "mbedtls/aes.h"
-#include "mbedtls/ecdh.h"
-#include "mbedtls/ecp.h"
-#include "mbedtls/ecdsa.h"
-#include "esp_system.h" // For esp_fill_random
+#include <mbedtls/entropy.h>
+#include <mbedtls/ctr_drbg.h>
+#include <mbedtls/sha256.h>
+#include <mbedtls/gcm.h>
+#include <mbedtls/aes.h>
+#include <mbedtls/ecdh.h>
+#include <mbedtls/ecp.h>
+#include <mbedtls/ecdsa.h>
+#include <mbedtls/base64.h>
+#include <esp_system.h> // For esp_fill_random
 
 // Debug macros (duplicated from TangServer.h to fix include order)
 #ifndef DEBUG_PRINTLN
@@ -95,36 +96,33 @@ void print_hex(const uint8_t* data, int len) {
  * @brief Base64URL encodes a byte array. This is a self-contained implementation.
  */
 String base64_url_encode(const uint8_t* data, size_t len) {
-    String encoded_string;
-    encoded_string.reserve((len + 2) / 3 * 4); // Pre-allocate memory
-    static const char b64_table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    // Step 1: Calculate required buffer size
+    size_t output_len = 0;
+    mbedtls_base64_encode(nullptr, 0, &output_len, data, len);
 
-    for (size_t i = 0; i < len; i += 3) {
-        uint32_t octet_a = i < len ? data[i] : 0;
-        uint32_t octet_b = (i + 1) < len ? data[i + 1] : 0;
-        uint32_t octet_c = (i + 2) < len ? data[i + 2] : 0;
+    // Step 2: Allocate buffer and perform encoding
+    uint8_t* buffer = new uint8_t[output_len + 1]; // +1 for null terminator
+    if (mbedtls_base64_encode(buffer, output_len, &output_len, data, len) != 0) {
+        delete[] buffer;
+        return String(); // Return empty string on failure
+    }
+    buffer[output_len] = '\0'; // Null-terminate
 
-        uint32_t triple = (octet_a << 16) + (octet_b << 8) + octet_c;
+    // Step 3: Convert to String
+    String encoded = String((char*)buffer);
+    delete[] buffer;
 
-        encoded_string += b64_table[(triple >> 18) & 0x3F];
-        encoded_string += b64_table[(triple >> 12) & 0x3F];
+    // Step 4: Replace standard Base64 characters with URL-safe ones
+    encoded.replace('+', '-');
+    encoded.replace('/', '_');
 
-        if (i + 1 < len) {
-            encoded_string += b64_table[(triple >> 6) & 0x3F];
-        }
-        if (i + 2 < len) {
-            encoded_string += b64_table[triple & 0x3F];
-        }
+    // Step 5: Remove padding
+    int padIndex = encoded.indexOf('=');
+    if (padIndex != -1) {
+        encoded.remove(padIndex);
     }
 
-    // Replace standard Base64 characters with URL-safe ones
-    encoded_string.replace('+', '-');
-    encoded_string.replace('/', '_');
-
-    // Remove padding, as it's not used in Base64URL
-    // The loop above naturally omits padding characters.
-
-    return encoded_string;
+    return encoded;
 }
 
 
@@ -133,57 +131,27 @@ String base64_url_encode(const uint8_t* data, size_t len) {
  * This is a self-contained implementation to avoid dependency issues.
  * @return Decoded length on success, -1 on failure.
  */
-int base64_url_decode(String b64_url, uint8_t* output, int max_len) {
-    String b64 = b64_url;
-    b64.replace('-', '+');
-    b64.replace('_', '/');
-    while (b64.length() % 4) {
-        b64 += "=";
-    }
 
-    int input_len = b64.length();
-    int output_len = (input_len / 4) * 3;
-    if (b64.endsWith("==")) {
-        output_len -= 2;
-    } else if (b64.endsWith("=")) {
-        output_len -= 1;
-    }
+ int base64_url_decode(String b64_url, uint8_t* output, int max_len) {
+     // Step 1: Convert Base64URL to standard Base64
+     String b64 = b64_url;
+     b64.replace('-', '+');
+     b64.replace('_', '/');
+     while (b64.length() % 4) {
+         b64 += "=";
+     }
 
-    if (output_len > max_len) {
-        return -1;
-    }
+     // Step 2: Decode using mbedTLS
+     size_t decoded_len = 0;
+     int ret = mbedtls_base64_decode(output, max_len, &decoded_len,
+                                     (const uint8_t*)b64.c_str(), b64.length());
 
-    int i = 0, j = 0;
-    uint32_t accumulator = 0;
-    int bits = 0;
+     if (ret != 0) {
+         return -1; // Decoding failed
+     }
 
-    for (i = 0; i < input_len; i++) {
-        char c = b64[i];
-        if (c >= 'A' && c <= 'Z') {
-            accumulator = (accumulator << 6) | (c - 'A');
-        } else if (c >= 'a' && c <= 'z') {
-            accumulator = (accumulator << 6) | (c - 'a' + 26);
-        } else if (c >= '0' && c <= '9') {
-            accumulator = (accumulator << 6) | (c - '0' + 52);
-        } else if (c == '+') {
-            accumulator = (accumulator << 6) | 62;
-        } else if (c == '/') {
-            accumulator = (accumulator << 6) | 63;
-        } else if (c == '=') {
-            break;
-        } else {
-            return -1; // Invalid character
-        }
-
-        bits += 6;
-        if (bits >= 8) {
-            bits -= 8;
-            output[j++] = (accumulator >> bits) & 0xFF;
-        }
-    }
-
-    return j;
-}
+     return decoded_len;
+ }
 
 /**
  * @brief Writes a 32-bit unsigned integer to a buffer in big-endian format.
