@@ -2,11 +2,9 @@
 #define TANG_SERVER_H
 
 #include <WiFi.h>
-#include <WiFiClientSecure.h>
 #include <WebServer.h>
 #include <ArduinoJson.h>
 #include <EEPROM.h>
-#include <base64.h>
 #include "CertHelper.h"
 #include "sdkconfig.h"
 
@@ -38,7 +36,6 @@ const char* initial_tang_password = CONFIG_INITIAL_TANG_PASSWORD;
 
 // --- Server & Crypto Globals ---
 WebServer server_http(80);
-WebServer server_https(443);
 
 // --- Server State ---
 bool is_active = false;
@@ -60,9 +57,7 @@ const int GCM_TAG_SIZE = 16;
 const int EEPROM_TANG_TAG_ADDR = EEPROM_TANG_KEY_ADDR + 32;
 const int EEPROM_WIFI_SSID_ADDR = EEPROM_TANG_TAG_ADDR + GCM_TAG_SIZE;
 const int EEPROM_WIFI_PASS_ADDR = EEPROM_WIFI_SSID_ADDR + 33;
-const int EEPROM_CERT_ADDR = EEPROM_WIFI_PASS_ADDR + 65;
-const int EEPROM_CERT_KEY_ADDR = EEPROM_CERT_ADDR + 2048;
-const uint32_t EEPROM_MAGIC_VALUE = 0xCAFED00D;
+const uint32_t EEPROM_MAGIC_VALUE = 0xCAFEDEAD;
 
 // Forward declare functions
 void startAPMode();
@@ -76,17 +71,11 @@ void startSTAMode();
 
 void setup() {
     Serial.begin(115200);
-    DEBUG_PRINTLN("\n\nESP32 Tang Server Starting (Secure Version)...");
+    DEBUG_PRINTLN("\n\nESP32 Tang Server Starting...");
 
     EEPROM.begin(EEPROM_SIZE);
     uint32_t magic = 0;
     EEPROM.get(EEPROM_MAGIC_ADDR, magic);
-
-    // Buffers to hold PEM data for the server
-    char cert_buf[2048];
-    char key_buf[2048];
-    memset(cert_buf, 0, sizeof(cert_buf));
-    memset(key_buf, 0, sizeof(key_buf));
 
     if (magic == EEPROM_MAGIC_VALUE) {
         DEBUG_PRINTLN("Found existing configuration in EEPROM.");
@@ -101,13 +90,6 @@ void setup() {
             EEPROM.get(EEPROM_WIFI_PASS_ADDR, wifi_password);
             DEBUG_PRINTLN("Loaded Wi-Fi credentials from EEPROM.");
         }
-
-        // Load SSL certificate and key PEM strings from EEPROM
-        EEPROM.get(EEPROM_CERT_ADDR, cert_buf);
-        EEPROM.get(EEPROM_CERT_KEY_ADDR, key_buf);
-        // TODO: Implement HTTPS server with proper SSL library
-        // server_https.setServerKeyAndCert_P(key_buf, cert_buf);
-        DEBUG_PRINTLN("Loaded SSL certificate and key from EEPROM (HTTPS disabled for now).");
 
     } else {
         DEBUG_PRINTLN("First run or NUKE'd: generating and saving new keys and certificate...");
@@ -125,16 +107,7 @@ void setup() {
         for (int i = 0; i < 32; ++i) EEPROM.write(EEPROM_TANG_KEY_ADDR + i, encrypted_tang_key[i]);
         for (int i = 0; i < GCM_TAG_SIZE; ++i) EEPROM.write(EEPROM_TANG_TAG_ADDR + i, gcm_tag[i]);
 
-        // 3. Generate and save self-signed certificate
-        CertHelper::generate_cert("Tang-ESP32-Server", 3650, key_buf, 2048, cert_buf, 2048);
-        for(int i=0; i < 2048; i++) EEPROM.write(EEPROM_CERT_ADDR + i, cert_buf[i]);
-        for(int i=0; i < 2048; i++) EEPROM.write(EEPROM_CERT_KEY_ADDR + i, key_buf[i]);
-
-        // TODO: Implement HTTPS server with proper SSL library
-        // server_https.setServerKeyAndCert_P(key_buf, cert_buf);
-        DEBUG_PRINTLN("Generated and saved new SSL certificate (HTTPS disabled for now).");
-
-        // 4. Write magic number and commit
+        // 3. Write magic number and commit
         EEPROM.put(EEPROM_MAGIC_ADDR, EEPROM_MAGIC_VALUE);
         if (EEPROM.commit()) {
             DEBUG_PRINTLN("Initial configuration saved to EEPROM.");
@@ -149,7 +122,6 @@ void setup() {
     startSTAMode();
 
     // --- Setup Server Routes ---
-    // HTTP routes (temporarily using HTTP instead of HTTPS)
     server_http.on("/adv", HTTP_GET, handleAdv);
     server_http.on("/rec", HTTP_POST, handleRec);
     server_http.on("/pub", HTTP_GET, handlePub);
@@ -159,11 +131,8 @@ void setup() {
     server_http.on("/reboot", HTTP_GET, handleReboot);
     server_http.onNotFound(handleNotFound);
 
-    // TODO: Setup HTTPS server with proper SSL library
-    // server_https.begin();
     server_http.begin();
-    DEBUG_PRINTLN("HTTP server listening on port 80 (HTTPS temporarily disabled).");
-    DEBUG_PRINTLN("HTTP redirect server listening on port 80.");
+    DEBUG_PRINTLN("HTTP server listening on port 80.");
     if (!is_active) {
         DEBUG_PRINTLN("Server is INACTIVE. POST to /activate to enable Tang services.");
     }
@@ -211,8 +180,6 @@ void loop() {
     }
 
     server_http.handleClient();
-    // TODO: Handle HTTPS client connections
-    // server_https.handleClient();
 }
 
 // --- WiFi Mode Management ---

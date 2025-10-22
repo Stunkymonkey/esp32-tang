@@ -206,11 +206,4 @@ void handleNotFound() {
     server_http.send(404, "text/plain", "Not found");
 }
 
-void handleHttpRedirect() {
-    String host = server_http.hasHeader("Host") ? server_http.header("Host") : WiFi.localIP().toString();
-    String redirectUrl = "https://" + host + server_http.uri();
-    server_http.sendHeader("Location", redirectUrl, true);
-    server_http.send(308, "text/plain", "Redirecting to HTTPS"); // 308 Permanent Redirect
-}
-
 #endif // HANDLERS_H
