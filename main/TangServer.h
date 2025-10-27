@@ -5,7 +5,6 @@
 #include <WebServer.h>
 #include <ArduinoJson.h>
 #include <EEPROM.h>
-#include "CertHelper.h"
 #include "sdkconfig.h"
 
 // --- Compile-time Configuration ---
@@ -68,7 +67,6 @@ void startSTAMode();
 #include "handlers.h"
 
 // --- Main Application Logic ---
-
 void setup() {
     Serial.begin(115200);
     DEBUG_PRINTLN("\n\nESP32 Tang Server Starting...");
