@@ -51,3 +51,7 @@ sdkconfig.old
 
 managed_components/
 .cache/
+
+# Cryptographic files
+*.jwk
+*.jwe
