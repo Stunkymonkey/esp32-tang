@@ -387,32 +387,47 @@ void concat_kdf(uint8_t* output_key, size_t output_key_len_bytes,
                 const char* alg_id, size_t alg_id_len) {
 
     mbedtls_sha256_context sha_ctx;
-    mbedtls_sha256_init(&sha_ctx);
-    mbedtls_sha256_starts(&sha_ctx, 0); // 0 for SHA-256 (not SHA-224)
-
     uint8_t round_counter[4];
-    write_be32(round_counter, 1);
+    uint8_t field_len_be[4];
+    const uint8_t zeros[4] = {0};
+    uint8_t digest[32];
 
-    mbedtls_sha256_update(&sha_ctx, round_counter, 4);
+    mbedtls_sha256_init(&sha_ctx);
+
+    // Start SHA-256 (0 = SHA-256, 1 = SHA-224)
+    mbedtls_sha256_starts(&sha_ctx, 0);
+
+    // Counter = 1
+    write_be32(round_counter, 1);
+    mbedtls_sha256_update(&sha_ctx, round_counter, sizeof(round_counter));
+
+    // Z (shared secret)
     mbedtls_sha256_update(&sha_ctx, shared_secret, shared_secret_len);
 
-    uint8_t field_len_be[4];
+    // AlgorithmID length
     write_be32(field_len_be, alg_id_len);
-    mbedtls_sha256_update(&sha_ctx, field_len_be, 4);
+    mbedtls_sha256_update(&sha_ctx, field_len_be, sizeof(field_len_be));
+
+    // AlgorithmID bytes
     mbedtls_sha256_update(&sha_ctx, (const uint8_t*)alg_id, alg_id_len);
 
-    const uint8_t zeros[4] = {0, 0, 0, 0};
-    mbedtls_sha256_update(&sha_ctx, zeros, 4);
-    mbedtls_sha256_update(&sha_ctx, zeros, 4);
+    // Two zero fields (partyUInfo and partyVInfo or placeholders)
+    mbedtls_sha256_update(&sha_ctx, zeros, sizeof(zeros));
+    mbedtls_sha256_update(&sha_ctx, zeros, sizeof(zeros));
 
+    // Output key length in bits
     write_be32(field_len_be, output_key_len_bytes * 8);
-    mbedtls_sha256_update(&sha_ctx, field_len_be, 4);
+    mbedtls_sha256_update(&sha_ctx, field_len_be, sizeof(field_len_be));
 
-    uint8_t digest[32];
+    // Final digest
     mbedtls_sha256_finish(&sha_ctx, digest);
     mbedtls_sha256_free(&sha_ctx);
 
+    // Copy the required amount (must be <= 32)
     memcpy(output_key, digest, output_key_len_bytes);
+
+    // Zeroize sensitive data
+    memset(digest, 0, sizeof(digest));
 }
 
 /**
