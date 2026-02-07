@@ -46,19 +46,23 @@ unsigned long activation_timestamp = 0;
 const unsigned long KEY_LIFETIME_MS = 3600000; // 1 hour
 
 // --- Key Storage ---
-uint8_t tang_private_key[32];  // In-memory only when active
-uint8_t tang_public_key[64];   // In-memory only when active
-uint8_t admin_private_key[32]; // Persistent in EEPROM
-uint8_t admin_public_key[64];  // Derived from private key
+uint8_t tang_sig_private_key[32]; // Signing key - in-memory only when active
+uint8_t tang_sig_public_key[64];  // Signing key - in-memory only when active
+uint8_t tang_exc_private_key[32]; // Exchange key - in-memory only when active
+uint8_t tang_exc_public_key[64];  // Exchange key - in-memory only when active
+uint8_t admin_private_key[32];    // Persistent in EEPROM
+uint8_t admin_public_key[64];     // Derived from private key
 
 // --- EEPROM Configuration ---
 const int EEPROM_SIZE = 4096;
 const int EEPROM_MAGIC_ADDR = 0;
 const int EEPROM_ADMIN_KEY_ADDR = 4;
-const int EEPROM_TANG_KEY_ADDR = EEPROM_ADMIN_KEY_ADDR + 32;
+const int EEPROM_TANG_SIG_KEY_ADDR = EEPROM_ADMIN_KEY_ADDR + 32;
 const int GCM_TAG_SIZE = 16;
-const int EEPROM_TANG_TAG_ADDR = EEPROM_TANG_KEY_ADDR + 32;
-const int EEPROM_WIFI_SSID_ADDR = EEPROM_TANG_TAG_ADDR + GCM_TAG_SIZE;
+const int EEPROM_TANG_SIG_TAG_ADDR = EEPROM_TANG_SIG_KEY_ADDR + 32;
+const int EEPROM_TANG_EXC_KEY_ADDR = EEPROM_TANG_SIG_TAG_ADDR + GCM_TAG_SIZE;
+const int EEPROM_TANG_EXC_TAG_ADDR = EEPROM_TANG_EXC_KEY_ADDR + 32;
+const int EEPROM_WIFI_SSID_ADDR = EEPROM_TANG_EXC_TAG_ADDR + GCM_TAG_SIZE;
 const int EEPROM_WIFI_PASS_ADDR = EEPROM_WIFI_SSID_ADDR + 33;
 const uint32_t EEPROM_MAGIC_VALUE = 0xCAFEDEAD;
 
@@ -106,18 +110,29 @@ void setup()
     for (int i = 0; i < 32; ++i)
       EEPROM.write(EEPROM_ADMIN_KEY_ADDR + i, admin_private_key[i]);
 
-    // 2. Generate initial Tang key and encrypt it with the default password
-    generate_ec_keypair(tang_public_key, tang_private_key);
-    uint8_t encrypted_tang_key[32];
-    uint8_t gcm_tag[GCM_TAG_SIZE];
-    memcpy(encrypted_tang_key, tang_private_key, 32);
-    crypt_local_data_gcm(encrypted_tang_key, 32, initial_tang_password, true, gcm_tag);
+    // 2. Generate initial Tang signing key and encrypt it with the default password
+    generate_ec_keypair(tang_sig_public_key, tang_sig_private_key);
+    uint8_t encrypted_tang_sig_key[32];
+    uint8_t gcm_sig_tag[GCM_TAG_SIZE];
+    memcpy(encrypted_tang_sig_key, tang_sig_private_key, 32);
+    crypt_local_data_gcm(encrypted_tang_sig_key, 32, initial_tang_password, true, gcm_sig_tag);
     for (int i = 0; i < 32; ++i)
-      EEPROM.write(EEPROM_TANG_KEY_ADDR + i, encrypted_tang_key[i]);
+      EEPROM.write(EEPROM_TANG_SIG_KEY_ADDR + i, encrypted_tang_sig_key[i]);
     for (int i = 0; i < GCM_TAG_SIZE; ++i)
-      EEPROM.write(EEPROM_TANG_TAG_ADDR + i, gcm_tag[i]);
+      EEPROM.write(EEPROM_TANG_SIG_TAG_ADDR + i, gcm_sig_tag[i]);
 
-    // 3. Write magic number and commit
+    // 3. Generate initial Tang exchange key and encrypt it with the default password
+    generate_ec_keypair(tang_exc_public_key, tang_exc_private_key);
+    uint8_t encrypted_tang_exc_key[32];
+    uint8_t gcm_exc_tag[GCM_TAG_SIZE];
+    memcpy(encrypted_tang_exc_key, tang_exc_private_key, 32);
+    crypt_local_data_gcm(encrypted_tang_exc_key, 32, initial_tang_password, true, gcm_exc_tag);
+    for (int i = 0; i < 32; ++i)
+      EEPROM.write(EEPROM_TANG_EXC_KEY_ADDR + i, encrypted_tang_exc_key[i]);
+    for (int i = 0; i < GCM_TAG_SIZE; ++i)
+      EEPROM.write(EEPROM_TANG_EXC_TAG_ADDR + i, gcm_exc_tag[i]);
+
+    // 4. Write magic number and commit
     EEPROM.put(EEPROM_MAGIC_ADDR, EEPROM_MAGIC_VALUE);
     if (EEPROM.commit())
     {
@@ -144,7 +159,16 @@ void setup()
   server_http.on("/deactivate", HTTP_GET, handleDeactivate);  // Simple deactivate
   server_http.on("/deactivate", HTTP_POST, handleDeactivate); // Deactivate and set new password
   server_http.on("/reboot", HTTP_GET, handleReboot);
-  server_http.onNotFound(handleNotFound);
+
+  // Custom handler for /rec/{kid} paths - must be registered before onNotFound
+  server_http.onNotFound([]()
+                         {
+    String uri = server_http.uri();
+    if (uri.startsWith("/rec/") && server_http.method() == HTTP_POST) {
+      handleRec();
+    } else {
+      handleNotFound();
+    } });
 
   server_http.begin();
   DEBUG_PRINTLN("HTTP server listening on port 80.");

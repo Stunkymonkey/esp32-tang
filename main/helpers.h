@@ -33,35 +33,40 @@ static bool rng_initialized = false;
  * This is crucial for providing a strong entropy source.
  * @return 0 on success, negative on failure.
  */
-int init_rng() {
-    if (rng_initialized) {
-        return 0;
-    }
-
-    mbedtls_entropy_init(&entropy);
-    mbedtls_ctr_drbg_init(&ctr_drbg);
-
-    const char *pers = "esp32_tang_server";
-    int ret = mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func, &entropy,
-                                    (const unsigned char *)pers, strlen(pers));
-    if (ret != 0) {
-        DEBUG_PRINTF("mbedtls_ctr_drbg_seed failed: -0x%04x\n", -ret);
-        return ret;
-    }
-
-    rng_initialized = true;
+int init_rng()
+{
+  if (rng_initialized)
+  {
     return 0;
+  }
+
+  mbedtls_entropy_init(&entropy);
+  mbedtls_ctr_drbg_init(&ctr_drbg);
+
+  const char *pers = "esp32_tang_server";
+  int ret = mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func, &entropy,
+                                  (const unsigned char *)pers, strlen(pers));
+  if (ret != 0)
+  {
+    DEBUG_PRINTF("mbedtls_ctr_drbg_seed failed: -0x%04x\n", -ret);
+    return ret;
+  }
+
+  rng_initialized = true;
+  return 0;
 }
 
 /**
  * @brief Cleanup RNG resources
  */
-void cleanup_rng() {
-    if (rng_initialized) {
-        mbedtls_ctr_drbg_free(&ctr_drbg);
-        mbedtls_entropy_free(&entropy);
-        rng_initialized = false;
-    }
+void cleanup_rng()
+{
+  if (rng_initialized)
+  {
+    mbedtls_ctr_drbg_free(&ctr_drbg);
+    mbedtls_entropy_free(&entropy);
+    rng_initialized = false;
+  }
 }
 
 /**
@@ -70,61 +75,68 @@ void cleanup_rng() {
  * @param rng_ctx Pointer to store the RNG context
  * @return 0 on success, negative on failure
  */
-int get_rng_context(int (**rng_func)(void *, unsigned char *, size_t), void **rng_ctx) {
-    if (init_rng() != 0) {
-        return -1;
-    }
-    *rng_func = mbedtls_ctr_drbg_random;
-    *rng_ctx = &ctr_drbg;
-    return 0;
+int get_rng_context(int (**rng_func)(void *, unsigned char *, size_t), void **rng_ctx)
+{
+  if (init_rng() != 0)
+  {
+    return -1;
+  }
+  *rng_func = mbedtls_ctr_drbg_random;
+  *rng_ctx = &ctr_drbg;
+  return 0;
 }
 
 /**
  * @brief Prints a byte array as a hex string to the Serial console.
  */
-void print_hex(const uint8_t* data, int len) {
+void print_hex(const uint8_t *data, int len)
+{
 #if defined(DEBUG_SERIAL) && DEBUG_SERIAL > 0
-    for (int i = 0; i < len; ++i) {
-        if (data[i] < 0x10) Serial.print("0");
-        Serial.print(data[i], HEX);
-    }
-    Serial.println();
+  for (int i = 0; i < len; ++i)
+  {
+    if (data[i] < 0x10)
+      Serial.print("0");
+    Serial.print(data[i], HEX);
+  }
+  Serial.println();
 #endif
 }
 
 /**
  * @brief Base64URL encodes a byte array. This is a self-contained implementation.
  */
-String base64_url_encode(const uint8_t* data, size_t len) {
-    // Step 1: Calculate required buffer size
-    size_t output_len = 0;
-    mbedtls_base64_encode(nullptr, 0, &output_len, data, len);
+String base64_url_encode(const uint8_t *data, size_t len)
+{
+  // Step 1: Calculate required buffer size
+  size_t output_len = 0;
+  mbedtls_base64_encode(nullptr, 0, &output_len, data, len);
 
-    // Step 2: Allocate buffer and perform encoding
-    uint8_t* buffer = new uint8_t[output_len + 1]; // +1 for null terminator
-    if (mbedtls_base64_encode(buffer, output_len, &output_len, data, len) != 0) {
-        delete[] buffer;
-        return String(); // Return empty string on failure
-    }
-    buffer[output_len] = '\0'; // Null-terminate
-
-    // Step 3: Convert to String
-    String encoded = String((char*)buffer);
+  // Step 2: Allocate buffer and perform encoding
+  uint8_t *buffer = new uint8_t[output_len + 1]; // +1 for null terminator
+  if (mbedtls_base64_encode(buffer, output_len, &output_len, data, len) != 0)
+  {
     delete[] buffer;
+    return String(); // Return empty string on failure
+  }
+  buffer[output_len] = '\0'; // Null-terminate
 
-    // Step 4: Replace standard Base64 characters with URL-safe ones
-    encoded.replace('+', '-');
-    encoded.replace('/', '_');
+  // Step 3: Convert to String
+  String encoded = String((char *)buffer);
+  delete[] buffer;
 
-    // Step 5: Remove padding
-    int padIndex = encoded.indexOf('=');
-    if (padIndex != -1) {
-        encoded.remove(padIndex);
-    }
+  // Step 4: Replace standard Base64 characters with URL-safe ones
+  encoded.replace('+', '-');
+  encoded.replace('/', '_');
 
-    return encoded;
+  // Step 5: Remove padding
+  int padIndex = encoded.indexOf('=');
+  if (padIndex != -1)
+  {
+    encoded.remove(padIndex);
+  }
+
+  return encoded;
 }
-
 
 /**
  * @brief Decodes a Base64URL string into a byte array.
@@ -132,35 +144,39 @@ String base64_url_encode(const uint8_t* data, size_t len) {
  * @return Decoded length on success, -1 on failure.
  */
 
- int base64_url_decode(String b64_url, uint8_t* output, int max_len) {
-     // Step 1: Convert Base64URL to standard Base64
-     String b64 = b64_url;
-     b64.replace('-', '+');
-     b64.replace('_', '/');
-     while (b64.length() % 4) {
-         b64 += "=";
-     }
+int base64_url_decode(String b64_url, uint8_t *output, int max_len)
+{
+  // Step 1: Convert Base64URL to standard Base64
+  String b64 = b64_url;
+  b64.replace('-', '+');
+  b64.replace('_', '/');
+  while (b64.length() % 4)
+  {
+    b64 += "=";
+  }
 
-     // Step 2: Decode using mbedTLS
-     size_t decoded_len = 0;
-     int ret = mbedtls_base64_decode(output, max_len, &decoded_len,
-                                     (const uint8_t*)b64.c_str(), b64.length());
+  // Step 2: Decode using mbedTLS
+  size_t decoded_len = 0;
+  int ret = mbedtls_base64_decode(output, max_len, &decoded_len,
+                                  (const uint8_t *)b64.c_str(), b64.length());
 
-     if (ret != 0) {
-         return -1; // Decoding failed
-     }
+  if (ret != 0)
+  {
+    return -1; // Decoding failed
+  }
 
-     return decoded_len;
- }
+  return decoded_len;
+}
 
 /**
  * @brief Writes a 32-bit unsigned integer to a buffer in big-endian format.
  */
-void write_be32(uint8_t* buf, uint32_t val) {
-    buf[0] = (val >> 24) & 0xFF;
-    buf[1] = (val >> 16) & 0xFF;
-    buf[2] = (val >> 8) & 0xFF;
-    buf[3] = val & 0xFF;
+void write_be32(uint8_t *buf, uint32_t val)
+{
+  buf[0] = (val >> 24) & 0xFF;
+  buf[1] = (val >> 16) & 0xFF;
+  buf[2] = (val >> 8) & 0xFF;
+  buf[3] = val & 0xFF;
 }
 
 /**
@@ -169,62 +185,69 @@ void write_be32(uint8_t* buf, uint32_t val) {
  * @param priv_key Buffer for the private key (32 bytes).
  * @return true on success, false on failure.
  */
-bool generate_ec_keypair(uint8_t* pub_key, uint8_t* priv_key) {
-    if (init_rng() != 0) {
-        DEBUG_PRINTLN("RNG initialization failed");
-        return false;
-    }
+bool generate_ec_keypair(uint8_t *pub_key, uint8_t *priv_key)
+{
+  if (init_rng() != 0)
+  {
+    DEBUG_PRINTLN("RNG initialization failed");
+    return false;
+  }
 
-    mbedtls_ecp_group grp;
-    mbedtls_ecp_point Q;
-    mbedtls_mpi d;
+  mbedtls_ecp_group grp;
+  mbedtls_ecp_point Q;
+  mbedtls_mpi d;
 
-    mbedtls_ecp_group_init(&grp);
-    mbedtls_ecp_point_init(&Q);
-    mbedtls_mpi_init(&d);
+  mbedtls_ecp_group_init(&grp);
+  mbedtls_ecp_point_init(&Q);
+  mbedtls_mpi_init(&d);
 
-    int ret = 0;
+  int ret = 0;
 
-    // Load the secp256r1 curve
-    ret = mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_SECP256R1);
-    if (ret != 0) {
-        DEBUG_PRINTF("mbedtls_ecp_group_load failed: -0x%04x\n", -ret);
-        goto cleanup;
-    }
+  // Load the secp256r1 curve
+  ret = mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_SECP256R1);
+  if (ret != 0)
+  {
+    DEBUG_PRINTF("mbedtls_ecp_group_load failed: -0x%04x\n", -ret);
+    goto cleanup;
+  }
 
-    // Generate the key pair
-    ret = mbedtls_ecp_gen_keypair(&grp, &d, &Q, mbedtls_ctr_drbg_random, &ctr_drbg);
-    if (ret != 0) {
-        DEBUG_PRINTF("mbedtls_ecp_gen_keypair failed: -0x%04x\n", -ret);
-        goto cleanup;
-    }
+  // Generate the key pair
+  ret = mbedtls_ecp_gen_keypair(&grp, &d, &Q, mbedtls_ctr_drbg_random, &ctr_drbg);
+  if (ret != 0)
+  {
+    DEBUG_PRINTF("mbedtls_ecp_gen_keypair failed: -0x%04x\n", -ret);
+    goto cleanup;
+  }
 
-    // Export private key (32 bytes)
-    ret = mbedtls_mpi_write_binary(&d, priv_key, 32);
-    if (ret != 0) {
-        DEBUG_PRINTF("Failed to export private key: -0x%04x\n", -ret);
-        goto cleanup;
-    }
+  // Export private key (32 bytes)
+  ret = mbedtls_mpi_write_binary(&d, priv_key, 32);
+  if (ret != 0)
+  {
+    DEBUG_PRINTF("Failed to export private key: -0x%04x\n", -ret);
+    goto cleanup;
+  }
 
-    // Export public key (64 bytes: 32 for X, 32 for Y)
-    ret = mbedtls_mpi_write_binary(&Q.MBEDTLS_PRIVATE(X), pub_key, 32);
-    if (ret != 0) {
-        DEBUG_PRINTF("Failed to export public key X: -0x%04x\n", -ret);
-        goto cleanup;
-    }
+  // Export public key (64 bytes: 32 for X, 32 for Y)
+  ret = mbedtls_mpi_write_binary(&Q.MBEDTLS_PRIVATE(X), pub_key, 32);
+  if (ret != 0)
+  {
+    DEBUG_PRINTF("Failed to export public key X: -0x%04x\n", -ret);
+    goto cleanup;
+  }
 
-    ret = mbedtls_mpi_write_binary(&Q.MBEDTLS_PRIVATE(Y), pub_key + 32, 32);
-    if (ret != 0) {
-        DEBUG_PRINTF("Failed to export public key Y: -0x%04x\n", -ret);
-        goto cleanup;
-    }
+  ret = mbedtls_mpi_write_binary(&Q.MBEDTLS_PRIVATE(Y), pub_key + 32, 32);
+  if (ret != 0)
+  {
+    DEBUG_PRINTF("Failed to export public key Y: -0x%04x\n", -ret);
+    goto cleanup;
+  }
 
 cleanup:
-    mbedtls_ecp_group_free(&grp);
-    mbedtls_ecp_point_free(&Q);
-    mbedtls_mpi_free(&d);
+  mbedtls_ecp_group_free(&grp);
+  mbedtls_ecp_point_free(&Q);
+  mbedtls_mpi_free(&d);
 
-    return (ret == 0);
+  return (ret == 0);
 }
 
 /**
@@ -233,62 +256,69 @@ cleanup:
  * @param pub_key Buffer for the public key (64 bytes, X || Y).
  * @return true on success, false on failure.
  */
-bool compute_ec_public_key(const uint8_t* priv_key, uint8_t* pub_key) {
-    if (init_rng() != 0) {
-        DEBUG_PRINTLN("RNG initialization failed");
-        return false;
-    }
+bool compute_ec_public_key(const uint8_t *priv_key, uint8_t *pub_key)
+{
+  if (init_rng() != 0)
+  {
+    DEBUG_PRINTLN("RNG initialization failed");
+    return false;
+  }
 
-    mbedtls_ecp_group grp;
-    mbedtls_ecp_point Q;
-    mbedtls_mpi d;
+  mbedtls_ecp_group grp;
+  mbedtls_ecp_point Q;
+  mbedtls_mpi d;
 
-    mbedtls_ecp_group_init(&grp);
-    mbedtls_ecp_point_init(&Q);
-    mbedtls_mpi_init(&d);
+  mbedtls_ecp_group_init(&grp);
+  mbedtls_ecp_point_init(&Q);
+  mbedtls_mpi_init(&d);
 
-    int ret = 0;
+  int ret = 0;
 
-    // Load the secp256r1 curve
-    ret = mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_SECP256R1);
-    if (ret != 0) {
-        DEBUG_PRINTF("mbedtls_ecp_group_load failed: -0x%04x\n", -ret);
-        goto cleanup;
-    }
+  // Load the secp256r1 curve
+  ret = mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_SECP256R1);
+  if (ret != 0)
+  {
+    DEBUG_PRINTF("mbedtls_ecp_group_load failed: -0x%04x\n", -ret);
+    goto cleanup;
+  }
 
-    // Load private key
-    ret = mbedtls_mpi_read_binary(&d, priv_key, 32);
-    if (ret != 0) {
-        DEBUG_PRINTF("Failed to load private key: -0x%04x\n", -ret);
-        goto cleanup;
-    }
+  // Load private key
+  ret = mbedtls_mpi_read_binary(&d, priv_key, 32);
+  if (ret != 0)
+  {
+    DEBUG_PRINTF("Failed to load private key: -0x%04x\n", -ret);
+    goto cleanup;
+  }
 
-    // Compute public key Q = d * G
-    ret = mbedtls_ecp_mul(&grp, &Q, &d, &grp.G, mbedtls_ctr_drbg_random, &ctr_drbg);
-    if (ret != 0) {
-        DEBUG_PRINTF("mbedtls_ecp_mul failed: -0x%04x\n", -ret);
-        goto cleanup;
-    }
+  // Compute public key Q = d * G
+  ret = mbedtls_ecp_mul(&grp, &Q, &d, &grp.G, mbedtls_ctr_drbg_random, &ctr_drbg);
+  if (ret != 0)
+  {
+    DEBUG_PRINTF("mbedtls_ecp_mul failed: -0x%04x\n", -ret);
+    goto cleanup;
+  }
 
-    // Export public key (64 bytes: 32 for X, 32 for Y)
-    ret = mbedtls_mpi_write_binary(&Q.MBEDTLS_PRIVATE(X), pub_key, 32);
-    if (ret != 0) {
-        DEBUG_PRINTF("Failed to export public key X: -0x%04x\n", -ret);
-        goto cleanup;
-    }
+  // Export public key (64 bytes: 32 for X, 32 for Y)
+  ret = mbedtls_mpi_write_binary(&Q.MBEDTLS_PRIVATE(X), pub_key, 32);
+  if (ret != 0)
+  {
+    DEBUG_PRINTF("Failed to export public key X: -0x%04x\n", -ret);
+    goto cleanup;
+  }
 
-    ret = mbedtls_mpi_write_binary(&Q.MBEDTLS_PRIVATE(Y), pub_key + 32, 32);
-    if (ret != 0) {
-        DEBUG_PRINTF("Failed to export public key Y: -0x%04x\n", -ret);
-        goto cleanup;
-    }
+  ret = mbedtls_mpi_write_binary(&Q.MBEDTLS_PRIVATE(Y), pub_key + 32, 32);
+  if (ret != 0)
+  {
+    DEBUG_PRINTF("Failed to export public key Y: -0x%04x\n", -ret);
+    goto cleanup;
+  }
 
 cleanup:
-    mbedtls_ecp_group_free(&grp);
-    mbedtls_ecp_point_free(&Q);
-    mbedtls_mpi_free(&d);
+  mbedtls_ecp_group_free(&grp);
+  mbedtls_ecp_point_free(&Q);
+  mbedtls_mpi_free(&d);
 
-    return (ret == 0);
+  return (ret == 0);
 }
 
 /**
@@ -298,235 +328,433 @@ cleanup:
  * @param shared_secret Buffer for the resulting shared secret (32 bytes).
  * @return true on success, false on failure.
  */
-bool compute_ecdh_shared_secret(const uint8_t* eph_pub_key, const uint8_t* priv_key, uint8_t* shared_secret) {
-    if (init_rng() != 0) {
-        DEBUG_PRINTLN("RNG initialization failed");
-        return false;
-    }
+bool compute_ecdh_shared_secret(const uint8_t *eph_pub_key, const uint8_t *priv_key, uint8_t *shared_secret)
+{
+  if (init_rng() != 0)
+  {
+    DEBUG_PRINTLN("RNG initialization failed");
+    return false;
+  }
 
-    mbedtls_ecp_group grp;
-    mbedtls_ecp_point Q;
-    mbedtls_mpi d, z;
+  mbedtls_ecp_group grp;
+  mbedtls_ecp_point Q;
+  mbedtls_mpi d, z;
 
-    mbedtls_ecp_group_init(&grp);
-    mbedtls_ecp_point_init(&Q);
-    mbedtls_mpi_init(&d);
-    mbedtls_mpi_init(&z);
+  mbedtls_ecp_group_init(&grp);
+  mbedtls_ecp_point_init(&Q);
+  mbedtls_mpi_init(&d);
+  mbedtls_mpi_init(&z);
 
-    int ret = 0;
+  int ret = 0;
 
-    // Load the secp256r1 curve
-    ret = mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_SECP256R1);
-    if (ret != 0) {
-        DEBUG_PRINTF("mbedtls_ecp_group_load failed: -0x%04x\n", -ret);
-        goto cleanup;
-    }
+  // Load the secp256r1 curve
+  ret = mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_SECP256R1);
+  if (ret != 0)
+  {
+    DEBUG_PRINTF("mbedtls_ecp_group_load failed: -0x%04x\n", -ret);
+    goto cleanup;
+  }
 
-    // Load private key
-    ret = mbedtls_mpi_read_binary(&d, priv_key, 32);
-    if (ret != 0) {
-        DEBUG_PRINTF("Failed to load private key: -0x%04x\n", -ret);
-        goto cleanup;
-    }
+  // Load private key
+  ret = mbedtls_mpi_read_binary(&d, priv_key, 32);
+  if (ret != 0)
+  {
+    DEBUG_PRINTF("Failed to load private key: -0x%04x\n", -ret);
+    goto cleanup;
+  }
 
-    // Load ephemeral public key
-    ret = mbedtls_mpi_read_binary(&Q.MBEDTLS_PRIVATE(X), eph_pub_key, 32);
-    if (ret != 0) {
-        DEBUG_PRINTF("Failed to load ephemeral public key X: -0x%04x\n", -ret);
-        goto cleanup;
-    }
+  // Load ephemeral public key
+  ret = mbedtls_mpi_read_binary(&Q.MBEDTLS_PRIVATE(X), eph_pub_key, 32);
+  if (ret != 0)
+  {
+    DEBUG_PRINTF("Failed to load ephemeral public key X: -0x%04x\n", -ret);
+    goto cleanup;
+  }
 
-    ret = mbedtls_mpi_read_binary(&Q.MBEDTLS_PRIVATE(Y), eph_pub_key + 32, 32);
-    if (ret != 0) {
-        DEBUG_PRINTF("Failed to load ephemeral public key Y: -0x%04x\n", -ret);
-        goto cleanup;
-    }
+  ret = mbedtls_mpi_read_binary(&Q.MBEDTLS_PRIVATE(Y), eph_pub_key + 32, 32);
+  if (ret != 0)
+  {
+    DEBUG_PRINTF("Failed to load ephemeral public key Y: -0x%04x\n", -ret);
+    goto cleanup;
+  }
 
-    ret = mbedtls_mpi_lset(&Q.MBEDTLS_PRIVATE(Z), 1);
-    if (ret != 0) {
-        DEBUG_PRINTF("Failed to set Q.Z: -0x%04x\n", -ret);
-        goto cleanup;
-    }
+  ret = mbedtls_mpi_lset(&Q.MBEDTLS_PRIVATE(Z), 1);
+  if (ret != 0)
+  {
+    DEBUG_PRINTF("Failed to set Q.Z: -0x%04x\n", -ret);
+    goto cleanup;
+  }
 
-    // Verify the point is valid
-    ret = mbedtls_ecp_check_pubkey(&grp, &Q);
-    if (ret != 0) {
-        DEBUG_PRINTF("Invalid ephemeral public key: -0x%04x\n", -ret);
-        goto cleanup;
-    }
+  // Verify the point is valid
+  ret = mbedtls_ecp_check_pubkey(&grp, &Q);
+  if (ret != 0)
+  {
+    DEBUG_PRINTF("Invalid ephemeral public key: -0x%04x\n", -ret);
+    goto cleanup;
+  }
 
-    // Compute shared secret: z = d * Q
-    ret = mbedtls_ecp_mul(&grp, &Q, &d, &Q, mbedtls_ctr_drbg_random, &ctr_drbg);
-    if (ret != 0) {
-        DEBUG_PRINTF("mbedtls_ecp_mul failed: -0x%04x\n", -ret);
-        goto cleanup;
-    }
+  // Compute shared secret: z = d * Q
+  ret = mbedtls_ecp_mul(&grp, &Q, &d, &Q, mbedtls_ctr_drbg_random, &ctr_drbg);
+  if (ret != 0)
+  {
+    DEBUG_PRINTF("mbedtls_ecp_mul failed: -0x%04x\n", -ret);
+    goto cleanup;
+  }
 
-    // Export the X coordinate as the shared secret
-    ret = mbedtls_mpi_write_binary(&Q.MBEDTLS_PRIVATE(X), shared_secret, 32);
-    if (ret != 0) {
-        DEBUG_PRINTF("Failed to export shared secret: -0x%04x\n", -ret);
-        goto cleanup;
-    }
+  // Export the X coordinate as the shared secret
+  ret = mbedtls_mpi_write_binary(&Q.MBEDTLS_PRIVATE(X), shared_secret, 32);
+  if (ret != 0)
+  {
+    DEBUG_PRINTF("Failed to export shared secret: -0x%04x\n", -ret);
+    goto cleanup;
+  }
 
 cleanup:
-    mbedtls_ecp_group_free(&grp);
-    mbedtls_ecp_point_free(&Q);
-    mbedtls_mpi_free(&d);
-    mbedtls_mpi_free(&z);
+  mbedtls_ecp_group_free(&grp);
+  mbedtls_ecp_point_free(&Q);
+  mbedtls_mpi_free(&d);
+  mbedtls_mpi_free(&z);
 
-    return (ret == 0);
+  return (ret == 0);
 }
 
+/**
+ * @brief Computes an ECDH shared point (both X and Y coordinates) using mbedTLS.
+ * This is used for Tang's /rec endpoint which needs to return the full point.
+ * @param eph_pub_key The ephemeral public key from the client (64 bytes, X || Y).
+ * @param priv_key The server's private key (32 bytes).
+ * @param shared_point Buffer for the resulting shared point (64 bytes, X || Y).
+ * @return true on success, false on failure.
+ */
+bool compute_ecdh_shared_point(const uint8_t *eph_pub_key, const uint8_t *priv_key, uint8_t *shared_point)
+{
+  if (init_rng() != 0)
+  {
+    DEBUG_PRINTLN("RNG initialization failed");
+    return false;
+  }
+
+  mbedtls_ecp_group grp;
+  mbedtls_ecp_point Q;
+  mbedtls_mpi d;
+
+  mbedtls_ecp_group_init(&grp);
+  mbedtls_ecp_point_init(&Q);
+  mbedtls_mpi_init(&d);
+
+  int ret = 0;
+
+  // Load the secp256r1 curve
+  ret = mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_SECP256R1);
+  if (ret != 0)
+  {
+    DEBUG_PRINTF("mbedtls_ecp_group_load failed: -0x%04x\n", -ret);
+    goto cleanup;
+  }
+
+  // Load private key
+  ret = mbedtls_mpi_read_binary(&d, priv_key, 32);
+  if (ret != 0)
+  {
+    DEBUG_PRINTF("Failed to load private key: -0x%04x\n", -ret);
+    goto cleanup;
+  }
+
+  // Load ephemeral public key
+  ret = mbedtls_mpi_read_binary(&Q.MBEDTLS_PRIVATE(X), eph_pub_key, 32);
+  if (ret != 0)
+  {
+    DEBUG_PRINTF("Failed to load ephemeral public key X: -0x%04x\n", -ret);
+    goto cleanup;
+  }
+
+  ret = mbedtls_mpi_read_binary(&Q.MBEDTLS_PRIVATE(Y), eph_pub_key + 32, 32);
+  if (ret != 0)
+  {
+    DEBUG_PRINTF("Failed to load ephemeral public key Y: -0x%04x\n", -ret);
+    goto cleanup;
+  }
+
+  ret = mbedtls_mpi_lset(&Q.MBEDTLS_PRIVATE(Z), 1);
+  if (ret != 0)
+  {
+    DEBUG_PRINTF("Failed to set Q.Z: -0x%04x\n", -ret);
+    goto cleanup;
+  }
+
+  // Verify the point is valid
+  ret = mbedtls_ecp_check_pubkey(&grp, &Q);
+  if (ret != 0)
+  {
+    DEBUG_PRINTF("Invalid ephemeral public key: -0x%04x\n", -ret);
+    goto cleanup;
+  }
+
+  // Compute shared point: result = d * Q
+  ret = mbedtls_ecp_mul(&grp, &Q, &d, &Q, mbedtls_ctr_drbg_random, &ctr_drbg);
+  if (ret != 0)
+  {
+    DEBUG_PRINTF("mbedtls_ecp_mul failed: -0x%04x\n", -ret);
+    goto cleanup;
+  }
+
+  // Export both X and Y coordinates
+  ret = mbedtls_mpi_write_binary(&Q.MBEDTLS_PRIVATE(X), shared_point, 32);
+  if (ret != 0)
+  {
+    DEBUG_PRINTF("Failed to export shared point X: -0x%04x\n", -ret);
+    goto cleanup;
+  }
+
+  ret = mbedtls_mpi_write_binary(&Q.MBEDTLS_PRIVATE(Y), shared_point + 32, 32);
+  if (ret != 0)
+  {
+    DEBUG_PRINTF("Failed to export shared point Y: -0x%04x\n", -ret);
+    goto cleanup;
+  }
+
+cleanup:
+  mbedtls_ecp_group_free(&grp);
+  mbedtls_ecp_point_free(&Q);
+  mbedtls_mpi_free(&d);
+
+  return (ret == 0);
+}
+
+/**
+ * @brief Signs a 32-byte hash using ECDSA with P-256 curve
+ * @param hash The 32-byte hash to sign
+ * @param priv_key The private key (32 bytes)
+ * @param signature Buffer for the signature (64 bytes: r || s)
+ * @return true on success, false on failure
+ */
+bool sign_ecdsa_p256(const uint8_t *hash, const uint8_t *priv_key, uint8_t *signature)
+{
+  if (init_rng() != 0)
+  {
+    DEBUG_PRINTLN("RNG initialization failed");
+    return false;
+  }
+
+  mbedtls_ecp_group grp;
+  mbedtls_mpi d, r, s;
+
+  mbedtls_ecp_group_init(&grp);
+  mbedtls_mpi_init(&d);
+  mbedtls_mpi_init(&r);
+  mbedtls_mpi_init(&s);
+
+  int ret = 0;
+
+  // Load the secp256r1 curve
+  ret = mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_SECP256R1);
+  if (ret != 0)
+  {
+    DEBUG_PRINTF("mbedtls_ecp_group_load failed: -0x%04x\n", -ret);
+    goto cleanup;
+  }
+
+  // Load private key
+  ret = mbedtls_mpi_read_binary(&d, priv_key, 32);
+  if (ret != 0)
+  {
+    DEBUG_PRINTF("Failed to load private key: -0x%04x\n", -ret);
+    goto cleanup;
+  }
+
+  // Sign the hash
+  ret = mbedtls_ecdsa_sign(&grp, &r, &s, &d, hash, 32,
+                           mbedtls_ctr_drbg_random, &ctr_drbg);
+  if (ret != 0)
+  {
+    DEBUG_PRINTF("mbedtls_ecdsa_sign failed: -0x%04x\n", -ret);
+    goto cleanup;
+  }
+
+  // Export r and s (each 32 bytes)
+  ret = mbedtls_mpi_write_binary(&r, signature, 32);
+  if (ret != 0)
+  {
+    DEBUG_PRINTF("Failed to export signature r: -0x%04x\n", -ret);
+    goto cleanup;
+  }
+
+  ret = mbedtls_mpi_write_binary(&s, signature + 32, 32);
+  if (ret != 0)
+  {
+    DEBUG_PRINTF("Failed to export signature s: -0x%04x\n", -ret);
+    goto cleanup;
+  }
+
+cleanup:
+  mbedtls_ecp_group_free(&grp);
+  mbedtls_mpi_free(&d);
+  mbedtls_mpi_free(&r);
+  mbedtls_mpi_free(&s);
+
+  return (ret == 0);
+}
 
 /**
  * @brief Implements the Concat KDF using the mbedTLS C API.
  */
-void concat_kdf(uint8_t* output_key, size_t output_key_len_bytes,
-                const uint8_t* shared_secret, size_t shared_secret_len,
-                const char* alg_id, size_t alg_id_len) {
+void concat_kdf(uint8_t *output_key, size_t output_key_len_bytes,
+                const uint8_t *shared_secret, size_t shared_secret_len,
+                const char *alg_id, size_t alg_id_len)
+{
 
-    mbedtls_sha256_context sha_ctx;
-    uint8_t round_counter[4];
-    uint8_t field_len_be[4];
-    const uint8_t zeros[4] = {0};
-    uint8_t digest[32];
+  mbedtls_sha256_context sha_ctx;
+  uint8_t round_counter[4];
+  uint8_t field_len_be[4];
+  const uint8_t zeros[4] = {0};
+  uint8_t digest[32];
 
-    mbedtls_sha256_init(&sha_ctx);
+  mbedtls_sha256_init(&sha_ctx);
 
-    // Start SHA-256 (0 = SHA-256, 1 = SHA-224)
-    mbedtls_sha256_starts(&sha_ctx, 0);
+  // Start SHA-256 (0 = SHA-256, 1 = SHA-224)
+  mbedtls_sha256_starts(&sha_ctx, 0);
 
-    // Counter = 1
-    write_be32(round_counter, 1);
-    mbedtls_sha256_update(&sha_ctx, round_counter, sizeof(round_counter));
+  // Counter = 1
+  write_be32(round_counter, 1);
+  mbedtls_sha256_update(&sha_ctx, round_counter, sizeof(round_counter));
 
-    // Z (shared secret)
-    mbedtls_sha256_update(&sha_ctx, shared_secret, shared_secret_len);
+  // Z (shared secret)
+  mbedtls_sha256_update(&sha_ctx, shared_secret, shared_secret_len);
 
-    // AlgorithmID length
-    write_be32(field_len_be, alg_id_len);
-    mbedtls_sha256_update(&sha_ctx, field_len_be, sizeof(field_len_be));
+  // AlgorithmID length
+  write_be32(field_len_be, alg_id_len);
+  mbedtls_sha256_update(&sha_ctx, field_len_be, sizeof(field_len_be));
 
-    // AlgorithmID bytes
-    mbedtls_sha256_update(&sha_ctx, (const uint8_t*)alg_id, alg_id_len);
+  // AlgorithmID bytes
+  mbedtls_sha256_update(&sha_ctx, (const uint8_t *)alg_id, alg_id_len);
 
-    // Two zero fields (partyUInfo and partyVInfo or placeholders)
-    mbedtls_sha256_update(&sha_ctx, zeros, sizeof(zeros));
-    mbedtls_sha256_update(&sha_ctx, zeros, sizeof(zeros));
+  // Two zero fields (partyUInfo and partyVInfo or placeholders)
+  mbedtls_sha256_update(&sha_ctx, zeros, sizeof(zeros));
+  mbedtls_sha256_update(&sha_ctx, zeros, sizeof(zeros));
 
-    // Output key length in bits
-    write_be32(field_len_be, output_key_len_bytes * 8);
-    mbedtls_sha256_update(&sha_ctx, field_len_be, sizeof(field_len_be));
+  // Output key length in bits
+  write_be32(field_len_be, output_key_len_bytes * 8);
+  mbedtls_sha256_update(&sha_ctx, field_len_be, sizeof(field_len_be));
 
-    // Final digest
-    mbedtls_sha256_finish(&sha_ctx, digest);
-    mbedtls_sha256_free(&sha_ctx);
+  // Final digest
+  mbedtls_sha256_finish(&sha_ctx, digest);
+  mbedtls_sha256_free(&sha_ctx);
 
-    // Copy the required amount (must be <= 32)
-    memcpy(output_key, digest, output_key_len_bytes);
+  // Copy the required amount (must be <= 32)
+  memcpy(output_key, digest, output_key_len_bytes);
 
-    // Zeroize sensitive data
-    memset(digest, 0, sizeof(digest));
+  // Zeroize sensitive data
+  memset(digest, 0, sizeof(digest));
 }
 
 /**
  * @brief Decrypts data using AES-GCM with the mbedTLS C API.
  */
-bool jwe_gcm_decrypt(uint8_t* ciphertext_buf, size_t ciphertext_len,
-                     const uint8_t* cek, size_t cek_len,
-                     const uint8_t* iv, size_t iv_len,
-                     const uint8_t* tag, size_t tag_len,
-                     const uint8_t* aad, size_t aad_len) {
-    mbedtls_gcm_context gcm_ctx;
-    mbedtls_gcm_init(&gcm_ctx);
+bool jwe_gcm_decrypt(uint8_t *ciphertext_buf, size_t ciphertext_len,
+                     const uint8_t *cek, size_t cek_len,
+                     const uint8_t *iv, size_t iv_len,
+                     const uint8_t *tag, size_t tag_len,
+                     const uint8_t *aad, size_t aad_len)
+{
+  mbedtls_gcm_context gcm_ctx;
+  mbedtls_gcm_init(&gcm_ctx);
 
-    int ret = mbedtls_gcm_setkey(&gcm_ctx, MBEDTLS_CIPHER_ID_AES, cek, cek_len * 8);
-    if (ret != 0) {
-        DEBUG_PRINTF("mbedtls_gcm_setkey failed: -0x%04x\n", -ret);
-        mbedtls_gcm_free(&gcm_ctx);
-        return false;
-    }
-
-    ret = mbedtls_gcm_auth_decrypt(&gcm_ctx, ciphertext_len, iv, iv_len,
-                                   aad, aad_len, tag, tag_len,
-                                   ciphertext_buf, ciphertext_buf);
-
+  int ret = mbedtls_gcm_setkey(&gcm_ctx, MBEDTLS_CIPHER_ID_AES, cek, cek_len * 8);
+  if (ret != 0)
+  {
+    DEBUG_PRINTF("mbedtls_gcm_setkey failed: -0x%04x\n", -ret);
     mbedtls_gcm_free(&gcm_ctx);
+    return false;
+  }
 
-    if (ret != 0) {
-        DEBUG_PRINTF("mbedtls_gcm_auth_decrypt failed: -0x%04x\n", -ret);
-        return false;
-    }
+  ret = mbedtls_gcm_auth_decrypt(&gcm_ctx, ciphertext_len, iv, iv_len,
+                                 aad, aad_len, tag, tag_len,
+                                 ciphertext_buf, ciphertext_buf);
 
-    return true;
+  mbedtls_gcm_free(&gcm_ctx);
+
+  if (ret != 0)
+  {
+    DEBUG_PRINTF("mbedtls_gcm_auth_decrypt failed: -0x%04x\n", -ret);
+    return false;
+  }
+
+  return true;
 }
 
 /**
  * @brief Derives a key from a password using SHA-256 with the mbedTLS C API.
  */
-void derive_key_from_password(uint8_t* output_key, size_t key_len, const char* password) {
-    mbedtls_sha256_context sha_ctx;
-    mbedtls_sha256_init(&sha_ctx);
-    mbedtls_sha256_starts(&sha_ctx, 0); // 0 for SHA-256
-    mbedtls_sha256_update(&sha_ctx, (const uint8_t*)password, strlen(password));
+void derive_key_from_password(uint8_t *output_key, size_t key_len, const char *password)
+{
+  mbedtls_sha256_context sha_ctx;
+  mbedtls_sha256_init(&sha_ctx);
+  mbedtls_sha256_starts(&sha_ctx, 0); // 0 for SHA-256
+  mbedtls_sha256_update(&sha_ctx, (const uint8_t *)password, strlen(password));
 
-    uint8_t hash[32];
-    mbedtls_sha256_finish(&sha_ctx, hash);
-    mbedtls_sha256_free(&sha_ctx);
+  uint8_t hash[32];
+  mbedtls_sha256_finish(&sha_ctx, hash);
+  mbedtls_sha256_free(&sha_ctx);
 
-    memcpy(output_key, hash, key_len);
+  memcpy(output_key, hash, key_len);
 }
 
 /**
  * @brief Encrypts or decrypts local data using AES-GCM with the mbedTLS C API.
  */
-bool crypt_local_data_gcm(uint8_t* data, size_t data_len, const char* pw, bool encrypt, uint8_t* tag_buffer) {
-    byte key[16], iv[12];
-    derive_key_from_password(key, sizeof(key), pw);
-    memset(iv, 0, 12);
+bool crypt_local_data_gcm(uint8_t *data, size_t data_len, const char *pw, bool encrypt, uint8_t *tag_buffer)
+{
+  byte key[16], iv[12];
+  derive_key_from_password(key, sizeof(key), pw);
+  memset(iv, 0, 12);
 
-    mbedtls_gcm_context gcm_ctx;
-    mbedtls_gcm_init(&gcm_ctx);
+  mbedtls_gcm_context gcm_ctx;
+  mbedtls_gcm_init(&gcm_ctx);
 
-    int ret = mbedtls_gcm_setkey(&gcm_ctx, MBEDTLS_CIPHER_ID_AES, key, sizeof(key) * 8);
-    if (ret != 0) {
-        DEBUG_PRINTF("mbedtls_gcm_setkey failed: -0x%04x\n", -ret);
-        mbedtls_gcm_free(&gcm_ctx);
-        return false;
-    }
-
-    if (encrypt) {
-        ret = mbedtls_gcm_crypt_and_tag(&gcm_ctx, MBEDTLS_GCM_ENCRYPT, data_len,
-                                        iv, sizeof(iv), NULL, 0,
-                                        data, data, GCM_TAG_SIZE, tag_buffer);
-    } else {
-        ret = mbedtls_gcm_auth_decrypt(&gcm_ctx, data_len, iv, sizeof(iv),
-                                       NULL, 0, tag_buffer, GCM_TAG_SIZE,
-                                       data, data);
-    }
-
+  int ret = mbedtls_gcm_setkey(&gcm_ctx, MBEDTLS_CIPHER_ID_AES, key, sizeof(key) * 8);
+  if (ret != 0)
+  {
+    DEBUG_PRINTF("mbedtls_gcm_setkey failed: -0x%04x\n", -ret);
     mbedtls_gcm_free(&gcm_ctx);
+    return false;
+  }
 
-    if (ret != 0) {
-        DEBUG_PRINTF("GCM operation failed: -0x%04x\n", -ret);
-        return false;
-    }
+  if (encrypt)
+  {
+    ret = mbedtls_gcm_crypt_and_tag(&gcm_ctx, MBEDTLS_GCM_ENCRYPT, data_len,
+                                    iv, sizeof(iv), NULL, 0,
+                                    data, data, GCM_TAG_SIZE, tag_buffer);
+  }
+  else
+  {
+    ret = mbedtls_gcm_auth_decrypt(&gcm_ctx, data_len, iv, sizeof(iv),
+                                   NULL, 0, tag_buffer, GCM_TAG_SIZE,
+                                   data, data);
+  }
 
-    return true;
+  mbedtls_gcm_free(&gcm_ctx);
+
+  if (ret != 0)
+  {
+    DEBUG_PRINTF("GCM operation failed: -0x%04x\n", -ret);
+    return false;
+  }
+
+  return true;
 }
-
-// deactivate_server() function moved to TangServer.h to avoid dependency issues
 
 /**
  * @brief Clears sensitive key material from memory and deactivates the server.
  */
-void deactivate_server() {
-    is_active = false;
-    activation_timestamp = 0;
-    memset(tang_private_key, 0, sizeof(tang_private_key));
-    memset(tang_public_key, 0, sizeof(tang_public_key));
-    DEBUG_PRINTLN("Server DEACTIVATED. Tang keys cleared from memory.");
+void deactivate_server()
+{
+  is_active = false;
+  activation_timestamp = 0;
+  memset(tang_sig_private_key, 0, sizeof(tang_sig_private_key));
+  memset(tang_sig_public_key, 0, sizeof(tang_sig_public_key));
+  memset(tang_exc_private_key, 0, sizeof(tang_exc_private_key));
+  memset(tang_exc_public_key, 0, sizeof(tang_exc_public_key));
+  DEBUG_PRINTLN("Server DEACTIVATED. Tang keys cleared from memory.");
 }
 
 #endif // HELPERS_H
