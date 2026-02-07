@@ -131,14 +131,16 @@ void handleRec() {
         return;
     }
 
-    String uri = server_http.uri();
-    String prefix = "/rec/";
-    if (!uri.startsWith(prefix)) {
-         server_http.send(400, "text/plain", "Invalid URI format");
-         return;
+    String kid = server_http.pathArg(0);
+
+    if (kid.endsWith("/")) {
+        kid.remove(kid.length() - 1);
     }
-    String kid = uri.substring(prefix.length());
-    if (kid.endsWith("/")) kid.remove(kid.length() - 1);
+
+    if (kid.length() == 0) {
+        server_http.send(400, "text/plain", "Empty Key ID");
+        return;
+    }
 
     DEBUG_PRINTF("Requested KID: %s\n", kid.c_str());
 
@@ -347,10 +349,6 @@ void handleReboot() {
 }
 
 void handleNotFound() {
-    if (server_http.uri().startsWith("/rec/")) {
-        handleRec();
-        return;
-    }
     server_http.send(404, "text/plain", "Not found");
 }
 

@@ -3,6 +3,7 @@
 
 #include <WiFi.h>
 #include <WebServer.h>
+#include <uri/UriBraces.h>
 #include <ArduinoJson.h>
 #include <vector>
 #include <string>
@@ -86,10 +87,11 @@ void setup() {
 
     // --- Setup Server Routes ---
     server_http.on("/adv", HTTP_GET, handleAdv);
-    // ... rest of setup ...
-    server_http.on("/provision", HTTP_POST, handleProvision); // NEW: Load keys
-    
+    server_http.on(UriBraces("/rec/{}"), HTTP_POST, handleRec);
+
+    server_http.on("/provision", HTTP_POST, handleProvision); // Load keys
     server_http.on("/deactivate", HTTP_POST, handleDeactivate); // Clear keys
+
     server_http.on("/reboot", HTTP_GET, handleReboot);
     server_http.onNotFound(handleNotFound);
 
