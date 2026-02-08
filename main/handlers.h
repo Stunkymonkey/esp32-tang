@@ -131,9 +131,18 @@ void handleRec() {
         return;
     }
 
+    // Guard against missing path arguments by checking URI length
+    // Pattern is /rec/{}, so we expect at least /rec/X
+    String uri = server_http.uri();
+    if (uri.length() <= 5) {
+        server_http.send(400, "text/plain", "Missing Key ID in URL");
+        return;
+    }
+
     String kid = server_http.pathArg(0);
 
-    if (kid.endsWith("/")) {
+    // Safely strip trailing slash if present
+    if (kid.length() > 0 && kid.endsWith("/")) {
         kid.remove(kid.length() - 1);
     }
 
