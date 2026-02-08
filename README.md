@@ -14,19 +14,57 @@ A distributed deployment with multiple ESP32 Tang servers could further enhance 
 
 ## Usage
 
-### Activate the server
+### 0. Prerequisites
+
+Generate the keys using `jose`:
 
 ```bash
-curl http://<esp-ip>/pub > server_pub.jwk
-echo -n "change-me" | jose jwe enc -I- -k server_pub.jwk -o request.jwe -i '{"protected":{"enc":"A128GCM"}}'
-curl -X POST -H "Content-Type: application/json" -d @request.jwe http://<esp-ip>/activate
+jose jwk gen -i '{"alg":"ES512"}' -o sign.jwk
+jose jwk gen -i '{"alg":"ECMR"}' -o exc.jwk
 ```
 
-### Test the server
+### 1. Provision the Server
+Since this ESP32 implementation uses **volatile memory** (keys are lost on reboot), you must "provision" the server with keys after every startup.
 
+This is done by sending a JSON payload containing all your keys (Signing and Exchange) to the `/provision` endpoint.
+
+**If you have standard Tang key files** (e.g., `sign.jwk`, `exc.jwk` or named by thumbprint):
+You can bundle them using `jq`:
+
+```bash
+# Bundle separate JWK files into the payload structure
+jq -s '{keys: .}' *.jwk > payload.json
+
+# Send to ESP32
+curl -X POST -H "Content-Type: application/json" -d @payload.json http://<esp-ip>/provision
+```
+
+**Manual JSON Construction:**
+```json
+{
+  "keys": [
+    { "alg": "ES512", "key_ops": ["sign", "verify"], "kty": "EC", "crv": "P-521", "d": "...", "x": "...", "y": "..." },
+    { "alg": "ECMR", "key_ops": ["deriveKey"], "kty": "EC", "crv": "P-521", "d": "...", "x": "...", "y": "..." }
+  ]
+}
+```
+
+### 2. Standard Tang Usage
+Once provisioned, the ESP32 behaves like a standard Tang server.
+
+**Advertise Keys:**
 ```bash
 curl http://<esp-ip>/adv
 ```
+
+**Key Exchange (Recovery):**
+Standard clients (like Clevis) or manual requests can target the recovery endpoint:
+```bash
+curl -X POST -H "Content-Type: application/json" -d @client_key.jwk http://<esp-ip>/rec/<kid>
+```
+
+## Verification
+A python script `verify_tang.py` is included in this repository to demonstrate the full flow: generating keys, provisioning the device, and performing a test exchange.
 
 ## Useful Links
 
