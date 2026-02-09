@@ -3,8 +3,10 @@
 
 #include <WiFi.h>
 #include <WebServer.h>
+#include <uri/UriBraces.h>
 #include <ArduinoJson.h>
-#include <EEPROM.h>
+#include <vector>
+#include <string>
 #include "sdkconfig.h"
 
 // --- Compile-time Configuration ---
@@ -30,109 +32,74 @@ WifiMode current_wifi_mode = TANG_WIFI_STA;
 unsigned long mode_switch_timestamp = 0;
 const unsigned long WIFI_MODE_DURATION = 60000; // 60 seconds
 
-// --- Initial Setup Configuration ---
-const char* initial_tang_password = CONFIG_INITIAL_TANG_PASSWORD;
-
 // --- Server & Crypto Globals ---
 WebServer server_http(80);
 
 // --- Server State ---
 bool is_active = false;
-unsigned long activation_timestamp = 0;
-const unsigned long KEY_LIFETIME_MS = 3600000; // 1 hour
 
-// --- Key Storage ---
-uint8_t tang_private_key[32]; // In-memory only when active
-uint8_t tang_public_key[64];  // In-memory only when active
-uint8_t admin_private_key[32]; // Persistent in EEPROM
-uint8_t admin_public_key[64];  // Derived from private key
+// --- Key Management ---
+#include <mbedtls/ecp.h>
 
-// --- EEPROM Configuration ---
-const int EEPROM_SIZE = 4096;
-const int EEPROM_MAGIC_ADDR = 0;
-const int EEPROM_ADMIN_KEY_ADDR = 4;
-const int EEPROM_TANG_KEY_ADDR = EEPROM_ADMIN_KEY_ADDR + 32;
-const int GCM_TAG_SIZE = 16;
-const int EEPROM_TANG_TAG_ADDR = EEPROM_TANG_KEY_ADDR + 32;
-const int EEPROM_WIFI_SSID_ADDR = EEPROM_TANG_TAG_ADDR + GCM_TAG_SIZE;
-const int EEPROM_WIFI_PASS_ADDR = EEPROM_WIFI_SSID_ADDR + 33;
-const uint32_t EEPROM_MAGIC_VALUE = 0xCAFEDEAD;
+enum KeyUsage {
+    TANG_USAGE_SIGN,
+    TANG_USAGE_EXCHANGE
+};
+
+struct TangKey {
+    String kid;
+    KeyUsage usage; // SIGN or EXCHANGE
+    mbedtls_ecp_group_id curve_id; // MBEDTLS_ECP_DP_SECP256R1 or MBEDTLS_ECP_DP_SECP521R1
+    uint8_t private_key[66]; // Max size for P-521
+    uint8_t public_key[132]; // Max size for P-521 (X || Y)
+    size_t key_len; // Actual length of private key (32 or 66)
+};
+
+// Global in-memory storage for keys.
+// These are LOST on reboot, which is the desired behavior.
+std::vector<TangKey> active_keys;
 
 // Forward declare functions
 void startAPMode();
 void startSTAMode();
+void deactivate_server();
 
 // Include helper and handler files
+// Order matters: helpers first (crypto), then handlers (logic using inputs)
 #include "helpers.h"
 #include "handlers.h"
 
 // --- Main Application Logic ---
 void setup() {
     Serial.begin(115200);
+    // Give some time for power to settle and serial to connect
+    delay(2000); 
     DEBUG_PRINTLN("\n\nESP32 Tang Server Starting...");
 
-    EEPROM.begin(EEPROM_SIZE);
-    uint32_t magic = 0;
-    EEPROM.get(EEPROM_MAGIC_ADDR, magic);
+    // Keys must be provided via /provision endpoint.
+    // Future Improvement: Implement persistent storage (NVS or SPIFFS) to save keys across reboots.
 
-    if (magic == EEPROM_MAGIC_VALUE) {
-        DEBUG_PRINTLN("Found existing configuration in EEPROM.");
-        // Load Admin Key
-        for (int i = 0; i < 32; ++i) admin_private_key[i] = EEPROM.read(EEPROM_ADMIN_KEY_ADDR + i);
-        compute_ec_public_key(admin_private_key, admin_public_key);
-        DEBUG_PRINTLN("Loaded admin key.");
-
-        // Load Wi-Fi credentials if they exist
-        if (EEPROM.read(EEPROM_WIFI_SSID_ADDR) != 0xFF && EEPROM.read(EEPROM_WIFI_SSID_ADDR) != 0) {
-            EEPROM.get(EEPROM_WIFI_SSID_ADDR, wifi_ssid);
-            EEPROM.get(EEPROM_WIFI_PASS_ADDR, wifi_password);
-            DEBUG_PRINTLN("Loaded Wi-Fi credentials from EEPROM.");
-        }
-
+    if (wifi_ssid != NULL) {
+        startSTAMode();
     } else {
-        DEBUG_PRINTLN("First run or NUKE'd: generating and saving new keys and certificate...");
-
-        // 1. Generate and save admin key
-        generate_ec_keypair(admin_public_key, admin_private_key);
-        for (int i = 0; i < 32; ++i) EEPROM.write(EEPROM_ADMIN_KEY_ADDR + i, admin_private_key[i]);
-
-        // 2. Generate initial Tang key and encrypt it with the default password
-        generate_ec_keypair(tang_public_key, tang_private_key);
-        uint8_t encrypted_tang_key[32];
-        uint8_t gcm_tag[GCM_TAG_SIZE];
-        memcpy(encrypted_tang_key, tang_private_key, 32);
-        crypt_local_data_gcm(encrypted_tang_key, 32, initial_tang_password, true, gcm_tag);
-        for (int i = 0; i < 32; ++i) EEPROM.write(EEPROM_TANG_KEY_ADDR + i, encrypted_tang_key[i]);
-        for (int i = 0; i < GCM_TAG_SIZE; ++i) EEPROM.write(EEPROM_TANG_TAG_ADDR + i, gcm_tag[i]);
-
-        // 3. Write magic number and commit
-        EEPROM.put(EEPROM_MAGIC_ADDR, EEPROM_MAGIC_VALUE);
-        if (EEPROM.commit()) {
-            DEBUG_PRINTLN("Initial configuration saved to EEPROM.");
-        } else {
-            DEBUG_PRINTLN("ERROR: Failed to save to EEPROM!");
-        }
+        DEBUG_PRINTLN("ERROR: wifi_ssid is NULL! Cannot start WiFi.");
     }
-
-    DEBUG_PRINTLN("Admin Public Key:");
-    print_hex(admin_public_key, sizeof(admin_public_key));
-
-    startSTAMode();
 
     // --- Setup Server Routes ---
     server_http.on("/adv", HTTP_GET, handleAdv);
-    server_http.on("/rec", HTTP_POST, handleRec);
-    server_http.on("/pub", HTTP_GET, handlePub);
-    server_http.on("/activate", HTTP_POST, handleActivate);
-    server_http.on("/deactivate", HTTP_GET, handleDeactivate); // Simple deactivate
-    server_http.on("/deactivate", HTTP_POST, handleDeactivate); // Deactivate and set new password
+    server_http.on(UriBraces("/rec/{}"), HTTP_POST, handleRec);
+
+    server_http.on("/provision", HTTP_POST, handleProvision); // Load keys
+    server_http.on("/deactivate", HTTP_POST, handleDeactivate); // Clear keys
+
     server_http.on("/reboot", HTTP_GET, handleReboot);
     server_http.onNotFound(handleNotFound);
 
     server_http.begin();
     DEBUG_PRINTLN("HTTP server listening on port 80.");
-    if (!is_active) {
-        DEBUG_PRINTLN("Server is INACTIVE. POST to /activate to enable Tang services.");
+    
+    if (active_keys.empty()) {
+        DEBUG_PRINTLN("Server is INACTIVE. POST to /provision to load keys.");
     }
 }
 
@@ -142,16 +109,9 @@ void loop() {
         String command = Serial.readStringUntil('\n');
         command.trim();
         if (command.equalsIgnoreCase("NUKE")) {
-            DEBUG_PRINTLN("!!! NUKE command received! Wiping configuration...");
-            // By writing a different value to the magic address, we force
-            // the setup() function to re-initialize everything on next boot.
-            EEPROM.put(EEPROM_MAGIC_ADDR, (uint32_t)0x00);
-            if (EEPROM.commit()) {
-                DEBUG_PRINTLN("Configuration wiped. Restarting device.");
-            } else {
-                DEBUG_PRINTLN("ERROR: Failed to wipe configuration!");
-            }
-            delay(1000);
+            // NUKE command clears keys and reboots.
+            // Since we don't have persistent keys, a reboot is sufficient to clear state.
+            DEBUG_PRINTLN("NUKE command received. Restarting...");
             ESP.restart();
         }
     }
@@ -169,12 +129,6 @@ void loop() {
             // Print a dot every so often while trying to connect
             if ((millis() % 2000) < 50) DEBUG_PRINT(".");
         }
-    }
-
-    // --- Automatic Deactivation Timer ---
-    if (is_active && (millis() - activation_timestamp > KEY_LIFETIME_MS)) {
-        DEBUG_PRINTLN("Key lifetime expired. Deactivating server automatically.");
-        deactivate_server();
     }
 
     server_http.handleClient();
