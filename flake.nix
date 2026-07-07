@@ -4,7 +4,8 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
-    nixpkgs-esp-dev.url = "github:mirrexagon/nixpkgs-esp-dev";
+    #nixpkgs-esp-dev.url = "github:mirrexagon/nixpkgs-esp-dev";
+    nixpkgs-esp-dev.url = "github:Stunkymonkey/nixpkgs-esp-dev/fix-remote-builders";
   };
 
   outputs = { self, nixpkgs, flake-utils, nixpkgs-esp-dev }:
