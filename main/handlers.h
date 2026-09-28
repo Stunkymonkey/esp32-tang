@@ -359,6 +359,13 @@ void handleProvision() {
             continue;
         }
 
+        // A mismatched pair would advertise one key and sign or exchange
+        // with another, which clients can only detect as a broken server.
+        if (!ec_keypair_matches(newKey.private_key, newKey.public_key, newKey.curve_id, newKey.key_len)) {
+            DEBUG_PRINTLN("Skipping key whose private key does not match x/y: " + newKey.kid);
+            continue;
+        }
+
         // Derive the canonical JWK from the re-encoded coordinates, so the
         // thumbprint always matches the key exactly as /adv publishes it.
         newKey.thp_input = jwk_canonical_ec(

@@ -188,6 +188,22 @@ def verify_advertisement_paths(sign_key):
             sys.exit(1)
         print(f"OK ({len(r.text)} bytes)")
 
+def verify_mismatched_key_rejected(sign_key, exch_key):
+    """A key whose "d" does not belong to its x/y must not be loaded."""
+    print(f"\n[0] Provisioning a mismatched key pair to {ESP_IP} (expect 400)...")
+    bad = {k: v for k, v in sign_key.items() if not k.startswith('_')}
+    bad["d"] = exch_key["d"]
+    try:
+        r = requests.post(f"{ESP_IP}/provision", json={"keys": [bad]}, timeout=5)
+    except Exception as e:
+        print(f"Failed to connect: {e}")
+        sys.exit(1)
+
+    if r.status_code != 400:
+        print(f"Error: mismatched key accepted: {r.status_code} - {r.text}")
+        sys.exit(1)
+    print(f"Rejected: {r.text}")
+
 def perform_exchange(exch_key, hash_name="sha256"):
     # clevis computes this thumbprint from the advertised JWK and POSTs to
     # /rec/<thumbprint>; it never uses a "kid". S256 is its default, S1 appears
@@ -273,6 +289,7 @@ def run_test_suite(curve_name):
     sign_key = generate_key(["sign", "verify"], curve_name, kid="test-signing-key")
     exch_key = generate_key(["deriveKey"], curve_name)
 
+    verify_mismatched_key_rejected(sign_key, exch_key)
     provision(sign_key, exch_key)
     verify_advertisement(sign_key)
     verify_advertisement_paths(sign_key)

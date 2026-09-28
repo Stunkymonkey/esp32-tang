@@ -473,6 +473,50 @@ bool sign_data(const uint8_t* priv_key, mbedtls_ecp_group_id curve_id, size_t ke
     return true;
 }
 
+/**
+ * @brief Checks that a private key belongs to a public key.
+ * @param priv_key The private key (key_len bytes).
+ * @param pub_key The public key (X || Y, key_len bytes each).
+ * @param curve_id The curve ID (P-256 or P-521).
+ * @param key_len The length of the coordinate/private key (32 or 66).
+ * @return true if pub_key is a valid point equal to priv_key * G.
+ */
+bool ec_keypair_matches(const uint8_t* priv_key, const uint8_t* pub_key,
+                        mbedtls_ecp_group_id curve_id, size_t key_len) {
+    if (init_rng() != 0) return false;
+
+    mbedtls_ecp_keypair pub, prv;
+    mbedtls_ecp_keypair_init(&pub);
+    mbedtls_ecp_keypair_init(&prv);
+
+    // Uncompressed point encoding: 0x04 || X || Y
+    uint8_t point[133];
+    point[0] = 0x04;
+    memcpy(point + 1, pub_key, 2 * key_len);
+
+    int ret = mbedtls_ecp_read_key(curve_id, &prv, priv_key, key_len);
+    if (ret == 0) ret = mbedtls_ecp_group_load(&pub.MBEDTLS_PRIVATE(grp), curve_id);
+    if (ret == 0) {
+        ret = mbedtls_ecp_point_read_binary(&pub.MBEDTLS_PRIVATE(grp), &pub.MBEDTLS_PRIVATE(Q),
+                                            point, 1 + 2 * key_len);
+    }
+    if (ret == 0) ret = mbedtls_ecp_check_pubkey(&pub.MBEDTLS_PRIVATE(grp), &pub.MBEDTLS_PRIVATE(Q));
+    // check_pub_priv() compares pub.Q with prv.Q and then prv.Q with d * G,
+    // but read_key() only sets d. Give prv the claimed public point.
+    if (ret == 0) ret = mbedtls_ecp_copy(&prv.MBEDTLS_PRIVATE(Q), &pub.MBEDTLS_PRIVATE(Q));
+    if (ret == 0) ret = mbedtls_ecp_check_pub_priv(&pub, &prv, mbedtls_ctr_drbg_random, &ctr_drbg);
+
+    // Frees and wipes the copy of the private key.
+    mbedtls_ecp_keypair_free(&pub);
+    mbedtls_ecp_keypair_free(&prv);
+
+    if (ret != 0) {
+        DEBUG_PRINTF("ec_keypair_matches failed: -0x%04x\n", -ret);
+        return false;
+    }
+    return true;
+}
+
 // deactivate_server is in TangServer.h for global access
 
 
