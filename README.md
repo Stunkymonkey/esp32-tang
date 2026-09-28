@@ -64,7 +64,38 @@ curl -X POST -H "Content-Type: application/json" -d @client_key.jwk http://<esp-
 ```
 
 ## Verification
-A python script `verify_tang.py` is included in this repository to demonstrate the full flow: generating keys, provisioning the device, and performing a test exchange.
+
+Both checks below talk to a real ESP32 on your network and **replace the keys on it**: they deactivate the device, provision their own test keys, and leave it deactivated or holding those keys. Provision your own keys again afterwards.
+
+### Protocol check: `verify_tang.py`
+
+Runs the Tang endpoints against the device for both P-256 and P-521:
+- It generates fresh keys and provisions them, and checks that a key whose `d` does not match its `x`/`y` is rejected.
+- It verifies the `/adv` signature, and checks that `/adv`, `/adv/` and `/adv/<thp>` behave like tangd (404 for a thumbprint that is not a signing key's).
+- It performs `/rec/<thp>` exchanges using the S256 and S1 thumbprints.
+
+It needs Python with `requests` and `cryptography`:
+
+```bash
+python3 verify_tang.py http://<esp-ip>
+```
+
+### End-to-end check: NixOS VM test
+
+`tests/luks-clevis.nix` boots a NixOS VM whose root filesystem is LUKS-encrypted and bound to the ESP32 with Clevis:
+1. It checks that the initrd unlocks the root through the ESP32.
+2. It then deactivates the device and checks that the next boot falls back to the passphrase prompt.
+
+This exercises the real Clevis client, including the blinded exchange it performs.
+
+The VM reaches the ESP32 through QEMU's user-mode network, which the Nix sandbox blocks. The test is therefore exposed as a package rather than a flake check, and has to be run through its driver on a Linux host with KVM:
+
+```bash
+nix build .#luks-clevis-test.driver
+TANG_URL=http://<esp-ip> ./result/bin/nixos-test-driver
+```
+
+The driver writes VM disk images into the current directory, so run it from a scratch directory. To step through the test interactively, build `.#luks-clevis-test.driverInteractive` instead, then call `test_script()` or drive `machine` from the Python prompt.
 
 ## Useful Links
 
