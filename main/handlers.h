@@ -365,8 +365,8 @@ void deactivate_server() {
     is_active = false;
     // Secure erase
     for (auto& k : active_keys) {
-        memset(k.private_key, 0, 32);
-        memset(k.public_key, 0, 64);
+        memset(k.private_key, 0, sizeof(k.private_key));
+        memset(k.public_key, 0, sizeof(k.public_key));
     }
     active_keys.clear();
     DEBUG_PRINTLN("Server DEACTIVATED. Tang keys cleared from memory.");
