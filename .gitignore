@@ -55,3 +55,4 @@ managed_components/
 # Cryptographic files
 *.jwk
 *.jwe
+*.json

@@ -12,8 +12,36 @@
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system}.extend nixpkgs-esp-dev.overlays.default;
+
+        # verify_tang.py with its Python dependencies pinned. A separate
+        # command rather than a python3 in the dev shell, which would shadow
+        # the one ESP-IDF brings.
+        verify-tang = pkgs.writeShellApplication {
+          name = "verify-tang";
+          runtimeInputs = [
+            (pkgs.python3.withPackages (ps: [ ps.requests ps.cryptography ]))
+          ];
+          text = ''
+            exec python3 ${./verify_tang.py} "$@"
+          '';
+        };
       in
       {
+        packages = {
+          inherit verify-tang;
+        } // nixpkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+          # Not a check: the test needs the ESP32 on the network, which the
+          # sandbox blocks. See tests/luks-clevis.nix for how to run it.
+          luks-clevis-test = nixpkgs.legacyPackages.${system}.testers.runNixOSTest ./tests/luks-clevis.nix;
+        };
+
+        # Talks to the device, so it is an app rather than a check.
+        apps.verify = {
+          type = "app";
+          program = "${verify-tang}/bin/verify-tang";
+          meta.description = "Check a running ESP32 Tang server against the Tang protocol";
+        };
+
         devShells.default = pkgs.mkShell {
           name = "esp32-tang-dev";
 
@@ -22,6 +50,7 @@
             esp-idf-full
             jose
             clevis
+            verify-tang
 
             # Development tools
             gnumake

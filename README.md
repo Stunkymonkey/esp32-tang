@@ -14,19 +14,90 @@ A distributed deployment with multiple ESP32 Tang servers could further enhance 
 
 ## Usage
 
-### Activate the server
+### 0. Prerequisites
+
+Generate the keys using `jose`:
 
 ```bash
-curl http://<esp-ip>/pub > server_pub.jwk
-echo -n "change-me" | jose jwe enc -I- -k server_pub.jwk -o request.jwe -i '{"protected":{"enc":"A128GCM"}}'
-curl -X POST -H "Content-Type: application/json" -d @request.jwe http://<esp-ip>/activate
+jose jwk gen -i '{"alg":"ES512"}' -o sign.jwk
+jose jwk gen -i '{"alg":"ECMR"}' -o exc.jwk
 ```
 
-### Test the server
+### 1. Provision the Server
+Since this ESP32 implementation uses **volatile memory** (keys are lost on reboot), you must "provision" the server with keys after every startup.
 
+This is done by sending a JSON payload containing all your keys (Signing and Exchange) to the `/provision` endpoint.
+
+**If you have standard Tang key files** (e.g., `sign.jwk`, `exc.jwk` or named by thumbprint):
+You can bundle them using `jq`:
+
+```bash
+# Bundle separate JWK files into the payload structure
+jq -s '{keys: .}' *.jwk > payload.json
+
+# Send to ESP32
+curl -X POST -H "Content-Type: application/json" -d @payload.json http://<esp-ip>/provision
+```
+
+**Manual JSON Construction:**
+```json
+{
+  "keys": [
+    { "alg": "ES512", "key_ops": ["sign", "verify"], "kty": "EC", "crv": "P-521", "d": "...", "x": "...", "y": "..." },
+    { "alg": "ECMR", "key_ops": ["deriveKey"], "kty": "EC", "crv": "P-521", "d": "...", "x": "...", "y": "..." }
+  ]
+}
+```
+
+### 2. Standard Tang Usage
+Once provisioned, the ESP32 behaves like a standard Tang server.
+
+**Advertise Keys:**
 ```bash
 curl http://<esp-ip>/adv
 ```
+
+**Key Exchange (Recovery):**
+Standard clients (like Clevis) or manual requests can target the recovery endpoint:
+```bash
+curl -X POST -H "Content-Type: application/json" -d @client_key.jwk http://<esp-ip>/rec/<kid>
+```
+
+## Verification
+
+Both checks below talk to a real ESP32 on your network and **replace the keys on it**: they deactivate the device, provision their own test keys, and leave it deactivated or holding those keys. Provision your own keys again afterwards.
+
+### Protocol check: `verify_tang.py`
+
+Runs the Tang endpoints against the device for both P-256 and P-521:
+- It generates fresh keys and provisions them, and checks that a key whose `d` does not match its `x`/`y` is rejected.
+- It verifies the `/adv` signature, and checks that `/adv`, `/adv/` and `/adv/<thp>` behave like tangd (404 for a thumbprint that is not a signing key's).
+- It performs `/rec/<thp>` exchanges using the S256 and S1 thumbprints.
+
+Run it through the flake, which brings the Python dependencies:
+
+```bash
+nix run .#verify -- http://<esp-ip>
+```
+
+Inside `nix develop` the same command is available as `verify-tang http://<esp-ip>`. Without Nix, run `python3 verify_tang.py http://<esp-ip>` with `requests` and `cryptography` installed.
+
+### End-to-end check: NixOS VM test
+
+`tests/luks-clevis.nix` boots a NixOS VM whose root filesystem is LUKS-encrypted and bound to the ESP32 with Clevis:
+1. It checks that the initrd unlocks the root through the ESP32.
+2. It then deactivates the device and checks that the next boot falls back to the passphrase prompt.
+
+This exercises the real Clevis client, including the blinded exchange it performs.
+
+The VM reaches the ESP32 through QEMU's user-mode network, which the Nix sandbox blocks. The test is therefore exposed as a package rather than a flake check, and has to be run through its driver on a Linux host with KVM:
+
+```bash
+nix build .#luks-clevis-test.driver
+TANG_URL=http://<esp-ip> ./result/bin/nixos-test-driver
+```
+
+The driver writes VM disk images into the current directory, so run it from a scratch directory. To step through the test interactively, build `.#luks-clevis-test.driverInteractive` instead, then call `test_script()` or drive `machine` from the Python prompt.
 
 ## Useful Links
 
