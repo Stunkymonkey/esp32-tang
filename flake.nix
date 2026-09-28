@@ -14,6 +14,12 @@
         pkgs = nixpkgs.legacyPackages.${system}.extend nixpkgs-esp-dev.overlays.default;
       in
       {
+        # Not a check: the test needs the ESP32 on the network, which the
+        # sandbox blocks. See tests/luks-clevis.nix for how to run it.
+        packages = nixpkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+          luks-clevis-test = nixpkgs.legacyPackages.${system}.testers.runNixOSTest ./tests/luks-clevis.nix;
+        };
+
         devShells.default = pkgs.mkShell {
           name = "esp32-tang-dev";
 
