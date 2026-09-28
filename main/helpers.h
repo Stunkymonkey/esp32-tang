@@ -124,10 +124,7 @@ String base64_url_encode(const uint8_t* data, size_t len) {
     encoded.replace('/', '_');
 
     // Step 5: Remove padding
-    int padIndex = encoded.indexOf('=');
-    if (padIndex != -1) {
-        encoded.remove(padIndex);
-    }
+    encoded.replace("=", "");
 
     return encoded;
 }
