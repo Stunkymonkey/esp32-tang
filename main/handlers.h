@@ -24,8 +24,10 @@ bool key_matches_id(const TangKey& key, const String& id) {
 }
 
 /**
- * @brief Handles the /adv endpoint.
- * Returns a signed JWKSet containing the active keys.
+ * @brief Handles the /adv and /adv/{thp} endpoints.
+ * Returns a signed JWKSet containing the active keys. With a thumbprint, the
+ * set is signed by that signing key, and an unknown thumbprint yields 404,
+ * as in tangd's find_jws().
  */
 void handleAdv() {
     DEBUG_PRINTLN("Received request for /adv");
@@ -35,17 +37,32 @@ void handleAdv() {
         return;
     }
 
+    // Only "/adv/{thp}" has a path argument; pathArg() asserts on "/adv" and
+    // "/adv/", which are matched by handlers without one.
+    String thp;
+    if (server_http.uri().length() > strlen("/adv/")) {
+        thp = server_http.pathArg(0);
+        if (thp.endsWith("/")) {
+            thp.remove(thp.length() - 1);
+        }
+    }
+
     // 1. Identify the signing key
     const TangKey* signing_key = nullptr;
     for (const auto& key : active_keys) {
-        if (key.usage == TANG_USAGE_SIGN) {
+        if (key.usage != TANG_USAGE_SIGN) continue;
+        if (thp.length() == 0 || key_matches_id(key, thp)) {
             signing_key = &key;
             break;
         }
     }
 
     if (!signing_key) {
-        server_http.send(500, "text/plain", "Internal Error: No signing key available");
+        if (thp.length() > 0) {
+            server_http.send(404, "text/plain", "No signing key with this thumbprint");
+        } else {
+            server_http.send(500, "text/plain", "Internal Error: No signing key available");
+        }
         return;
     }
 

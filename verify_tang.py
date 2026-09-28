@@ -171,22 +171,31 @@ def verify_advertisement(sign_key):
         print(f"Failed: {e}")
         sys.exit(1)
 
-def verify_advertisement_paths(sign_key):
+def verify_advertisement_paths(sign_key, exch_key):
     """clevis fetches "$url/adv/$thp", which is "/adv/" when no thumbprint is
-    pinned in its config, so both spellings have to be served."""
+    pinned in its config, so both spellings have to be served. Like tangd, a
+    thumbprint that is not a signing key's must yield 404."""
     thp = jwk_thumbprint(sign_key)
-    for path in ("/adv", "/adv/", f"/adv/{thp}"):
-        print(f"\n[2b] Fetching {ESP_IP}{path} ...")
+    checks = [
+        ("/adv", 200),
+        ("/adv/", 200),
+        (f"/adv/{thp}", 200),
+        (f"/adv/{jwk_thumbprint(sign_key, 'sha1')}", 200),
+        (f"/adv/{jwk_thumbprint(exch_key)}", 404),
+        ("/adv/not-a-thumbprint", 404),
+    ]
+    for path, expected in checks:
+        print(f"\n[2b] Fetching {ESP_IP}{path} (expect {expected}) ...")
         try:
             r = requests.get(f"{ESP_IP}{path}", timeout=5)
         except Exception as e:
             print(f"Failed: {e}")
             sys.exit(1)
 
-        if r.status_code != 200:
+        if r.status_code != expected:
             print(f"Error: {path} returned {r.status_code} - {r.text}")
             sys.exit(1)
-        print(f"OK ({len(r.text)} bytes)")
+        print(f"OK ({r.status_code}, {len(r.text)} bytes)")
 
 def verify_mismatched_key_rejected(sign_key, exch_key):
     """A key whose "d" does not belong to its x/y must not be loaded."""
@@ -292,7 +301,7 @@ def run_test_suite(curve_name):
     verify_mismatched_key_rejected(sign_key, exch_key)
     provision(sign_key, exch_key)
     verify_advertisement(sign_key)
-    verify_advertisement_paths(sign_key)
+    verify_advertisement_paths(sign_key, exch_key)
     perform_exchange(exch_key, "sha256")
     perform_exchange(exch_key, "sha1")
     print(f"{'='*20} {curve_name} Test Complete {'='*20}\n")
