@@ -273,9 +273,11 @@ def perform_exchange(exch_key, hash_name="sha256"):
                  print("Shared Secret VALIDATED! (X coordinate matches after padding fix)")
             else:
                  print(f"Shared Secret MISMATCH!\nExpected: {shared_key.hex()}\nGot:      {srv_x.hex()}")
-            
+                 sys.exit(1)
+
     except Exception as e:
         print(f"Failed: {e}")
+        sys.exit(1)
 
 def deactivate():
     print(f"\n[4] Deactivating/Reseting Server {ESP_IP}/deactivate...")
