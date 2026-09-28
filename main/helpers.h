@@ -3,7 +3,9 @@
 
 #include <mbedtls/entropy.h>
 #include <mbedtls/ctr_drbg.h>
+#include <mbedtls/sha1.h>
 #include <mbedtls/sha256.h>
+#include <mbedtls/sha512.h>
 #include <mbedtls/gcm.h>
 #include <mbedtls/aes.h>
 #include <mbedtls/ecdh.h>
@@ -156,6 +158,54 @@ String base64_url_encode(const uint8_t* data, size_t len) {
 
      return decoded_len;
  }
+
+// Hash algorithms tangd accepts for thumbprint lookups (see supported_hashes()
+// in tang's keys.c). clevis writes S256 by default, S1 in older versions.
+static const char* const TANG_THP_ALGS[] = { "S1", "S224", "S256", "S384", "S512" };
+
+/**
+ * @brief Builds the canonical JWK of an EC public key as defined by RFC 7638:
+ * required members only ("crv", "kty", "x", "y"), lexicographically ordered,
+ * no whitespace. This exact string is what clients hash to derive the key ID.
+ */
+String jwk_canonical_ec(const char* crv, const String& x, const String& y) {
+    return String("{\"crv\":\"") + crv + "\",\"kty\":\"EC\",\"x\":\"" + x +
+           "\",\"y\":\"" + y + "\"}";
+}
+
+/**
+ * @brief Computes the Base64URL JWK thumbprint of a canonical JWK.
+ * @param jwk_json Canonical JWK as produced by jwk_canonical_ec().
+ * @param alg One of the JOSE hash names in TANG_THP_ALGS.
+ * @return The thumbprint, or an empty String if the algorithm is unknown.
+ */
+String jwk_thumbprint(const String& jwk_json, const char* alg) {
+    const uint8_t* input = (const uint8_t*)jwk_json.c_str();
+    size_t input_len = jwk_json.length();
+    uint8_t digest[64];
+    size_t digest_len;
+
+    if (strcmp(alg, "S1") == 0) {
+        if (mbedtls_sha1(input, input_len, digest) != 0) return String();
+        digest_len = 20;
+    } else if (strcmp(alg, "S224") == 0) {
+        if (mbedtls_sha256(input, input_len, digest, 1) != 0) return String();
+        digest_len = 28;
+    } else if (strcmp(alg, "S256") == 0) {
+        if (mbedtls_sha256(input, input_len, digest, 0) != 0) return String();
+        digest_len = 32;
+    } else if (strcmp(alg, "S384") == 0) {
+        if (mbedtls_sha512(input, input_len, digest, 1) != 0) return String();
+        digest_len = 48;
+    } else if (strcmp(alg, "S512") == 0) {
+        if (mbedtls_sha512(input, input_len, digest, 0) != 0) return String();
+        digest_len = 64;
+    } else {
+        return String();
+    }
+
+    return base64_url_encode(digest, digest_len);
+}
 
 /**
  * @brief Generates a new secp256r1 key pair using mbedTLS.

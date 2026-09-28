@@ -45,6 +45,7 @@ enum KeyUsage {
 
 struct TangKey {
     String kid;
+    String thp_input; // Canonical JWK per RFC 7638, hashed to get the thumbprint
     KeyUsage usage; // SIGN or EXCHANGE
     mbedtls_ecp_group_id curve_id; // MBEDTLS_ECP_DP_SECP256R1 or MBEDTLS_ECP_DP_SECP521R1
     uint8_t private_key[66]; // Max size for P-521

@@ -40,7 +40,7 @@ def jwk_thumbprint(jwk, hash_name="sha256"):
     ).encode('utf-8')
     return base64url_encode(hashlib.new(hash_name, canonical).digest())
 
-def generate_key(ops, curve_name="P-256"):
+def generate_key(ops, curve_name="P-256", kid=None):
     if curve_name == "P-521":
         private_key = ec.generate_private_key(ec.SECP521R1())
         coord_len = 66
@@ -55,12 +55,7 @@ def generate_key(ops, curve_name="P-256"):
     x = numbers.public_numbers.x.to_bytes(coord_len, 'big')
     y = numbers.public_numbers.y.to_bytes(coord_len, 'big')
     
-    kid = base64url_encode(x[:8]) # Simple KID derived from X
-    
-    print(f"Generated key for {ops} ({curve_name}): {kid}")
-    
-    return {
-        "kid": kid,
+    key = {
         "key_ops": ops,
         "kty": "EC",
         "crv": curve_name,
@@ -70,6 +65,15 @@ def generate_key(ops, curve_name="P-256"):
         "_priv": private_key,
         "_pub": private_key.public_key()
     }
+
+    # tang's own .jwk files have no "kid"; keys are addressed by thumbprint.
+    # An explicit kid is optional and only used by clients that ask for it.
+    if kid is not None:
+        key["kid"] = kid
+
+    print(f"Generated key for {ops} ({curve_name}): {jwk_thumbprint(key)}")
+
+    return key
 
 def provision(sign_key, exch_key):
     print(f"\n[1] Provisioning keys to {ESP_IP}...")
@@ -147,10 +151,18 @@ def verify_advertisement(sign_key):
         except Exception as e:
             print(f"Signature Verification FAILED: {e}")
             sys.exit(1)
-            
+
+        adv = json.loads(base64url_decode(payload))
+
+        # tang advertises the raw JWKs, which carry no "kid". A kid here would
+        # be ignored by clevis, which always addresses keys by thumbprint.
+        for k in adv.get('keys', []):
+            if 'kid' in k:
+                print(f"WARNING: advertised key contains a 'kid' ({k['kid']}); tang does not send one")
+
         print("Advertisement Payload:")
-        print(json.dumps(json.loads(base64url_decode(payload)), indent=2))
-        
+        print(json.dumps(adv, indent=2))
+
     except Exception as e:
         print(f"Failed: {e}")
         sys.exit(1)
@@ -172,9 +184,13 @@ def verify_advertisement_paths(sign_key):
             sys.exit(1)
         print(f"OK ({len(r.text)} bytes)")
 
-def perform_exchange(exch_key):
-    print(f"\n[3] Performing Exchange on {ESP_IP}/rec/{exch_key['kid']}...")
-    
+def perform_exchange(exch_key, hash_name="sha256"):
+    # clevis computes this thumbprint from the advertised JWK and POSTs to
+    # /rec/<thumbprint>; it never uses a "kid". S256 is its default, S1 appears
+    # in JWEs written by older versions - tang accepts both.
+    kid = jwk_thumbprint(exch_key, hash_name)
+    print(f"\n[3] Performing Exchange on {ESP_IP}/rec/{kid} ({hash_name} thumbprint)...")
+
     curve_name = exch_key.get("crv", "P-256")
     if curve_name == "P-521":
         cli_priv = ec.generate_private_key(ec.SECP521R1())
@@ -195,14 +211,14 @@ def perform_exchange(exch_key):
     }
     
     try:
-        r = requests.post(f"{ESP_IP}/rec/{exch_key['kid']}", json=payload, timeout=5)
+        r = requests.post(f"{ESP_IP}/rec/{kid}", json=payload, timeout=5)
         if r.status_code != 200:
             print(f"Exchange failed: {r.status_code} - {r.text}")
             sys.exit(1)
-            
+
         resp = r.json()
         print("Received Server Share:", resp)
-        
+
         # Verify Shared Secret
         srv_x = base64url_decode(resp['x'])
         
@@ -241,13 +257,16 @@ def run_test_suite(curve_name):
     print(f"\n{'='*20} Testing Curve: {curve_name} {'='*20}")
     
     print("Generating Keys...")
-    sign_key = generate_key(["sign", "verify"], curve_name)
+    # The signing key carries an explicit kid to cover the optional-kid path;
+    # the exchange key has none, matching the .jwk files tang ships.
+    sign_key = generate_key(["sign", "verify"], curve_name, kid="test-signing-key")
     exch_key = generate_key(["deriveKey"], curve_name)
 
     provision(sign_key, exch_key)
     verify_advertisement(sign_key)
     verify_advertisement_paths(sign_key)
-    perform_exchange(exch_key)
+    perform_exchange(exch_key, "sha256")
+    perform_exchange(exch_key, "sha1")
     print(f"{'='*20} {curve_name} Test Complete {'='*20}\n")
 
 if __name__ == "__main__":

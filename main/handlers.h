@@ -6,6 +6,24 @@
 #include <mbedtls/sha512.h>
 
 /**
+ * @brief Checks whether a key is addressed by the given key ID.
+ * clevis derives the ID from the advertised JWK (RFC 7638 thumbprint) and never
+ * uses a "kid" member, so the thumbprints are authoritative. The kid supplied at
+ * provisioning time is still accepted for clients that use it.
+ */
+bool key_matches_id(const TangKey& key, const String& id) {
+    if (key.kid.length() > 0 && key.kid.equals(id)) {
+        return true;
+    }
+    for (const char* alg : TANG_THP_ALGS) {
+        if (jwk_thumbprint(key.thp_input, alg).equals(id)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
  * @brief Handles the /adv endpoint.
  * Returns a signed JWKSet containing the active keys.
  */
@@ -45,7 +63,8 @@ void handleAdv() {
             k["crv"] = "P-256";
             k["alg"] = (key.usage == TANG_USAGE_SIGN) ? "ES256" : "ECMR";
         }
-        k["kid"] = key.kid;
+        // No "kid": tangd advertises the raw JWKs, which carry no key ID.
+        // Clients address keys by their RFC 7638 thumbprint instead.
         k["x"] = base64_url_encode(key.public_key, key.key_len);
         k["y"] = base64_url_encode(key.public_key + key.key_len, key.key_len);
         
@@ -155,7 +174,8 @@ void handleRec() {
 
     const TangKey* exchange_key = nullptr;
     for (const auto& key : active_keys) {
-        if (key.kid.equals(kid) && key.usage == TANG_USAGE_EXCHANGE) {
+        if (key.usage != TANG_USAGE_EXCHANGE) continue;
+        if (key_matches_id(key, kid)) {
             exchange_key = &key;
             break;
         }
@@ -262,7 +282,11 @@ void handleProvision() {
     int count = 0;
     for (JsonObject k : keys) {
         TangKey newKey;
-        newKey.kid = k["kid"].as<String>();
+        // Optional: tang's own .jwk files carry no "kid". Guard against the
+        // literal "null" ArduinoJson yields for a missing member.
+        if (k["kid"].is<const char*>()) {
+            newKey.kid = k["kid"].as<String>();
+        }
         
         bool usage_found = false;
         
@@ -325,6 +349,13 @@ void handleProvision() {
             DEBUG_PRINTLN("Failed to decode key data for kid: " + newKey.kid);
             continue;
         }
+
+        // Derive the canonical JWK from the re-encoded coordinates, so the
+        // thumbprint always matches the key exactly as /adv publishes it.
+        newKey.thp_input = jwk_canonical_ec(
+            crv.c_str(),
+            base64_url_encode(newKey.public_key, newKey.key_len),
+            base64_url_encode(newKey.public_key + newKey.key_len, newKey.key_len));
 
         active_keys.push_back(newKey);
         count++;
