@@ -12,6 +12,7 @@
 #include <mbedtls/ecp.h>
 #include <mbedtls/ecdsa.h>
 #include <mbedtls/base64.h>
+#include <mbedtls/platform_util.h>
 #include <esp_system.h> // For esp_fill_random
 
 // Debug macros (duplicated from TangServer.h to fix include order)
@@ -68,6 +69,17 @@ void cleanup_rng() {
         rng_initialized = false;
     }
 }
+
+/**
+ * @brief Wipes a String's buffer when it goes out of scope, for request data
+ * that carries private keys.
+ */
+struct ScopedWipe {
+    String& s;
+    ~ScopedWipe() {
+        mbedtls_platform_zeroize(const_cast<char*>(s.c_str()), s.length());
+    }
+};
 
 /**
  * @brief Get the random number generator function and context
@@ -135,8 +147,15 @@ String base64_url_encode(const uint8_t* data, size_t len) {
  */
 
  int base64_url_decode(String b64_url, uint8_t* output, int max_len) {
+     // The input may be a private key. Size the working copy up front so the
+     // padding never reallocates it, and wipe both copies on return.
+     String b64;
+     b64.reserve(b64_url.length() + 3);
+     ScopedWipe wipe_input{b64_url};
+     ScopedWipe wipe_b64{b64};
+
      // Step 1: Convert Base64URL to standard Base64
-     String b64 = b64_url;
+     b64 = b64_url;
      b64.replace('-', '+');
      b64.replace('_', '/');
      while (b64.length() % 4) {

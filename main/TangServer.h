@@ -37,6 +37,7 @@ WebServer server_http(80);
 
 // --- Key Management ---
 #include <mbedtls/ecp.h>
+#include <mbedtls/platform_util.h>
 
 enum KeyUsage {
     TANG_USAGE_SIGN,
@@ -51,6 +52,11 @@ struct TangKey {
     uint8_t private_key[66]; // Max size for P-521
     uint8_t public_key[132]; // Max size for P-521 (X || Y)
     size_t key_len; // Actual length of private key (32 or 66)
+
+    // Wipe the private key whenever a copy goes away: the temporary built
+    // during provisioning, the old storage when active_keys reallocates, and
+    // every key on deactivation. Unlike memset(), this cannot be optimized out.
+    ~TangKey() { mbedtls_platform_zeroize(private_key, sizeof(private_key)); }
 };
 
 // Global in-memory storage for keys.

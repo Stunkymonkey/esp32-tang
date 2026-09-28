@@ -266,8 +266,14 @@ void handleProvision() {
          return;
     }
     
+    // The body carries private keys. Parse it in place (zero-copy), so they
+    // only live in this buffer, which is wiped on every return path.
+    // WebServer still keeps its own copy of the body until the next request.
+    String body = server_http.arg("plain");
+    ScopedWipe wipe_body{body};
+
     DynamicJsonDocument doc(8192); // Increased for larger P-521 payloads
-    DeserializationError error = deserializeJson(doc, server_http.arg("plain"));
+    DeserializationError error = deserializeJson(doc, const_cast<char*>(body.c_str()));
     
     if (error) {
         server_http.send(400, "text/plain", "Invalid JSON");
@@ -340,7 +346,9 @@ void handleProvision() {
             continue;
         }
 
-        String d_str = k["d"];
+        // Passed straight through, so the only copy is the one
+        // base64_url_decode() wipes.
+        const char* d_str = k["d"] | "";
         String x_str = k["x"];
         String y_str = k["y"];
 
@@ -390,10 +398,7 @@ void handleNotFound() {
 }
 
 void deactivate_server() {
-    for (auto& k : active_keys) {
-        memset(k.private_key, 0, sizeof(k.private_key));
-        memset(k.public_key, 0, sizeof(k.public_key));
-    }
+    // ~TangKey() wipes each private key as the vector releases it.
     active_keys.clear();
     std::vector<TangKey>().swap(active_keys);
     DEBUG_PRINTLN("Server DEACTIVATED. Tang keys cleared from memory.");
