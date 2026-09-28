@@ -135,7 +135,7 @@ void handleAdv() {
     String jws_json;
     serializeJson(jwsDoc, jws_json);
 
-    server_http.send(200, "application/json", jws_json);
+    server_http.send(200, "application/jose+json", jws_json);
     DEBUG_PRINTLN("Sent signed JWKSet (JSON Serialization).");
 }
 
@@ -237,15 +237,16 @@ void handleRec() {
     }
 
     DynamicJsonDocument respDoc(1024);
+    respDoc["alg"] = "ECMR";
     respDoc["kty"] = "EC";
     respDoc["crv"] = crv;
     respDoc["x"] = base64_url_encode(shared_point, exchange_key->key_len);
     respDoc["y"] = base64_url_encode(shared_point + exchange_key->key_len, exchange_key->key_len);
-    respDoc["key_ops"].add("deriveKey"); 
+    respDoc["key_ops"].add("deriveKey");
 
     String response;
     serializeJson(respDoc, response);
-    server_http.send(200, "application/json", response);
+    server_http.send(200, "application/jwk+json", response);
     DEBUG_PRINTLN("Sent ECDH result.");
 }
 

@@ -152,6 +152,10 @@ def verify_advertisement(sign_key):
             print(f"Signature Verification FAILED: {e}")
             sys.exit(1)
 
+        ctype = r.headers.get('Content-Type', '')
+        if ctype != "application/jose+json":
+            print(f"WARNING: /adv Content-Type is '{ctype}', tang sends 'application/jose+json'")
+
         adv = json.loads(base64url_decode(payload))
 
         # tang advertises the raw JWKs, which carry no "kid". A kid here would
@@ -216,8 +220,15 @@ def perform_exchange(exch_key, hash_name="sha256"):
             print(f"Exchange failed: {r.status_code} - {r.text}")
             sys.exit(1)
 
+        ctype = r.headers.get('Content-Type', '')
+        if ctype != "application/jwk+json":
+            print(f"WARNING: /rec Content-Type is '{ctype}', tang sends 'application/jwk+json'")
+
         resp = r.json()
         print("Received Server Share:", resp)
+
+        if resp.get('alg') != "ECMR":
+            print(f"WARNING: /rec reply has alg '{resp.get('alg')}', tang sends 'ECMR'")
 
         # Verify Shared Secret
         srv_x = base64url_decode(resp['x'])
