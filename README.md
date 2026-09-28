@@ -74,11 +74,13 @@ Runs the Tang endpoints against the device for both P-256 and P-521:
 - It verifies the `/adv` signature, and checks that `/adv`, `/adv/` and `/adv/<thp>` behave like tangd (404 for a thumbprint that is not a signing key's).
 - It performs `/rec/<thp>` exchanges using the S256 and S1 thumbprints.
 
-It needs Python with `requests` and `cryptography`:
+Run it through the flake, which brings the Python dependencies:
 
 ```bash
-python3 verify_tang.py http://<esp-ip>
+nix run .#verify -- http://<esp-ip>
 ```
+
+Inside `nix develop` the same command is available as `verify-tang http://<esp-ip>`. Without Nix, run `python3 verify_tang.py http://<esp-ip>` with `requests` and `cryptography` installed.
 
 ### End-to-end check: NixOS VM test
 
