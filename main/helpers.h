@@ -25,9 +25,9 @@
 
 // --- Helper Functions ---
 
-// Global entropy and DRBG contexts for reuse (extern for access from other modules)
-mbedtls_entropy_context* entropy = nullptr;
-mbedtls_ctr_drbg_context* ctr_drbg = nullptr;
+// Global entropy and DRBG contexts, shared by all crypto helpers
+static mbedtls_entropy_context entropy;
+static mbedtls_ctr_drbg_context ctr_drbg;
 static bool rng_initialized = false;
 
 /**
@@ -40,17 +40,17 @@ int init_rng() {
         return 0;
     }
     
-    entropy = new mbedtls_entropy_context;
-    ctr_drbg = new mbedtls_ctr_drbg_context;
-
-    mbedtls_entropy_init(entropy);
-    mbedtls_ctr_drbg_init(ctr_drbg);
+    mbedtls_entropy_init(&entropy);
+    mbedtls_ctr_drbg_init(&ctr_drbg);
 
     const char *pers = "esp32_tang_server";
-    int ret = mbedtls_ctr_drbg_seed(ctr_drbg, mbedtls_entropy_func, entropy,
+    int ret = mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func, &entropy,
                                     (const unsigned char *)pers, strlen(pers));
     if (ret != 0) {
         DEBUG_PRINTF("mbedtls_ctr_drbg_seed failed: -0x%04x\n", -ret);
+        // Release what the init calls set up, so a retry starts clean.
+        mbedtls_ctr_drbg_free(&ctr_drbg);
+        mbedtls_entropy_free(&entropy);
         return ret;
     }
 
@@ -63,12 +63,8 @@ int init_rng() {
  */
 void cleanup_rng() {
     if (rng_initialized) {
-        mbedtls_ctr_drbg_free(ctr_drbg);
-        mbedtls_entropy_free(entropy);
-        delete ctr_drbg;
-        delete entropy;
-        ctr_drbg = nullptr;
-        entropy = nullptr;
+        mbedtls_ctr_drbg_free(&ctr_drbg);
+        mbedtls_entropy_free(&entropy);
         rng_initialized = false;
     }
 }
@@ -84,7 +80,7 @@ int get_rng_context(int (**rng_func)(void *, unsigned char *, size_t), void **rn
         return -1;
     }
     *rng_func = mbedtls_ctr_drbg_random;
-    *rng_ctx = ctr_drbg;
+    *rng_ctx = &ctr_drbg;
     return 0;
 }
 
@@ -237,7 +233,7 @@ bool generate_ec_keypair(uint8_t* pub_key, uint8_t* priv_key) {
     }
 
     // Generate the key pair
-    ret = mbedtls_ecp_gen_keypair(&grp, &d, &Q, mbedtls_ctr_drbg_random, ctr_drbg);
+    ret = mbedtls_ecp_gen_keypair(&grp, &d, &Q, mbedtls_ctr_drbg_random, &ctr_drbg);
     if (ret != 0) {
         DEBUG_PRINTF("mbedtls_ecp_gen_keypair failed: -0x%04x\n", -ret);
         goto cleanup;
@@ -308,7 +304,7 @@ bool compute_ec_public_key(const uint8_t* priv_key, uint8_t* pub_key) {
     }
 
     // Compute public key Q = d * G
-    ret = mbedtls_ecp_mul(&grp, &Q, &d, &grp.G, mbedtls_ctr_drbg_random, ctr_drbg);
+    ret = mbedtls_ecp_mul(&grp, &Q, &d, &grp.G, mbedtls_ctr_drbg_random, &ctr_drbg);
     if (ret != 0) {
         DEBUG_PRINTF("mbedtls_ecp_mul failed: -0x%04x\n", -ret);
         goto cleanup;
@@ -377,7 +373,7 @@ bool compute_ecdh_shared_secret(const uint8_t* eph_pub_key, const uint8_t* priv_
     if (ret == 0) ret = mbedtls_ecp_check_pubkey(&grp, &Q);
 
     // Compute shared secret: result_Q = d * Q
-    if (ret == 0) ret = mbedtls_ecp_mul(&grp, &Q, &d, &Q, mbedtls_ctr_drbg_random, ctr_drbg);
+    if (ret == 0) ret = mbedtls_ecp_mul(&grp, &Q, &d, &Q, mbedtls_ctr_drbg_random, &ctr_drbg);
 
     // Export both X and Y using standard function to ensure affine coordinates (handles Z normalization)
     // 1 byte header (0x04) + key_len (X) + key_len (Y)
@@ -437,7 +433,7 @@ bool sign_data(const uint8_t* priv_key, mbedtls_ecp_group_id curve_id, size_t ke
     
     // Sign the hash
     if (ret == 0) {
-        ret = mbedtls_ecdsa_sign(&grp, &r, &s, &d, hash, hash_len, mbedtls_ctr_drbg_random, ctr_drbg);
+        ret = mbedtls_ecdsa_sign(&grp, &r, &s, &d, hash, hash_len, mbedtls_ctr_drbg_random, &ctr_drbg);
     }
 
     if (ret == 0) {
