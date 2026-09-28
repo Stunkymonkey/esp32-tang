@@ -83,7 +83,13 @@ void setup() {
     }
 
     // --- Setup Server Routes ---
+    // clevis requests "$url/adv/$thp", which becomes "/adv/" when no thumbprint
+    // is pinned in its config. tangd matches "^/+adv/*$" and "^/+adv/+<thp>$".
+    // A pinned thumbprint is ignored here; clevis re-checks it against the
+    // advertised keys anyway, and we only ever hold one key set.
     server_http.on("/adv", HTTP_GET, handleAdv);
+    server_http.on("/adv/", HTTP_GET, handleAdv);
+    server_http.on(UriBraces("/adv/{}"), HTTP_GET, handleAdv);
     server_http.on(UriBraces("/rec/{}"), HTTP_POST, handleRec);
 
     server_http.on("/provision", HTTP_POST, handleProvision); // Load keys

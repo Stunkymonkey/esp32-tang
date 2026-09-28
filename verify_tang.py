@@ -2,6 +2,7 @@
 import requests
 import json
 import base64
+import hashlib
 import sys
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives import serialization, hashes
@@ -27,6 +28,17 @@ def base64url_encode(data):
 def base64url_decode(data):
     padding = '=' * (4 - (len(data) % 4))
     return base64.urlsafe_b64decode(data + padding)
+
+def jwk_thumbprint(jwk, hash_name="sha256"):
+    """RFC 7638 JWK thumbprint: hash of the required members only, in
+    lexicographic order and without whitespace. This is how clevis derives the
+    key ID it uses for /rec, so the server must accept the same value."""
+    canonical = json.dumps(
+        {"crv": jwk["crv"], "kty": jwk["kty"], "x": jwk["x"], "y": jwk["y"]},
+        separators=(',', ':'),
+        sort_keys=True
+    ).encode('utf-8')
+    return base64url_encode(hashlib.new(hash_name, canonical).digest())
 
 def generate_key(ops, curve_name="P-256"):
     if curve_name == "P-521":
@@ -143,6 +155,23 @@ def verify_advertisement(sign_key):
         print(f"Failed: {e}")
         sys.exit(1)
 
+def verify_advertisement_paths(sign_key):
+    """clevis fetches "$url/adv/$thp", which is "/adv/" when no thumbprint is
+    pinned in its config, so both spellings have to be served."""
+    thp = jwk_thumbprint(sign_key)
+    for path in ("/adv", "/adv/", f"/adv/{thp}"):
+        print(f"\n[2b] Fetching {ESP_IP}{path} ...")
+        try:
+            r = requests.get(f"{ESP_IP}{path}", timeout=5)
+        except Exception as e:
+            print(f"Failed: {e}")
+            sys.exit(1)
+
+        if r.status_code != 200:
+            print(f"Error: {path} returned {r.status_code} - {r.text}")
+            sys.exit(1)
+        print(f"OK ({len(r.text)} bytes)")
+
 def perform_exchange(exch_key):
     print(f"\n[3] Performing Exchange on {ESP_IP}/rec/{exch_key['kid']}...")
     
@@ -217,6 +246,7 @@ def run_test_suite(curve_name):
 
     provision(sign_key, exch_key)
     verify_advertisement(sign_key)
+    verify_advertisement_paths(sign_key)
     perform_exchange(exch_key)
     print(f"{'='*20} {curve_name} Test Complete {'='*20}\n")
 
