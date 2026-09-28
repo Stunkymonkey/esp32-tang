@@ -35,9 +35,6 @@ const unsigned long WIFI_MODE_DURATION = 60000; // 60 seconds
 // --- Server & Crypto Globals ---
 WebServer server_http(80);
 
-// --- Server State ---
-bool is_active = false;
-
 // --- Key Management ---
 #include <mbedtls/ecp.h>
 

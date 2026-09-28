@@ -331,7 +331,6 @@ void handleProvision() {
     }
 
     if (count > 0) {
-        is_active = true;
         server_http.send(200, "text/plain", "Provisioned " + String(count) + " keys.");
         DEBUG_PRINTLN("Provisioned keys.");
     } else {
@@ -344,9 +343,6 @@ void handleProvision() {
 
 void handleDeactivate() {
     deactivate_server();
-    active_keys.clear();
-    // Force vector to release memory
-    std::vector<TangKey>().swap(active_keys);
     server_http.send(200, "text/plain", "Server deactivated and keys cleared.");
 }
 
@@ -362,13 +358,12 @@ void handleNotFound() {
 }
 
 void deactivate_server() {
-    is_active = false;
-    // Secure erase
     for (auto& k : active_keys) {
         memset(k.private_key, 0, sizeof(k.private_key));
         memset(k.public_key, 0, sizeof(k.public_key));
     }
     active_keys.clear();
+    std::vector<TangKey>().swap(active_keys);
     DEBUG_PRINTLN("Server DEACTIVATED. Tang keys cleared from memory.");
 }
 
