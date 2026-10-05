@@ -82,24 +82,37 @@ There is no separate `on_provision`; `on_state_change` reports `pending`.
 
 ### Stored key format
 
-The keys are stored as one record using ESPHome's preferences on NVS. The record is a fixed-size struct, sized for one P-521 signing key and one P-521 exchange key with room to spare. After the first `/activate` and after `/wipe`, the component calls `global_preferences->sync()` immediately, so a power loss right afterwards cannot lose the change or bring back wiped keys.
+The keys are stored as one NVS blob, key `keys` in the namespace `tang_server`. The component uses the ESP-IDF NVS API directly rather than ESPHome's preferences, for three reasons:
+- **Copies:** preferences keep every write in a heap buffer until the next sync and free it without wiping. Comparing with the stored value reads it into another unwiped buffer.
+- **Erasing:** preferences cannot erase a record.
+- **Threads:** preferences may only be used from the main loop. NVS is thread-safe, so the httpd task stores and erases the record itself and answers only once the change is committed.
 
-The record holds a format version followed by a payload:
+ESPHome initializes NVS at boot for its own preferences, so the component only opens its namespace. Every store and erase ends with `nvs_commit()`, so a power loss right after the first `/activate` or a `/wipe` cannot lose the change or bring back wiped keys.
 
-- **Without a password:** the payload is the `{"keys": [...]}` JSON that `/provision` received, in plaintext.
-- **With `require_password`:** the payload is encrypted. All integers are big-endian.
+The record starts with a fixed magic number and a format version, followed by the payload. The payload is the `{"keys": [...]}` JSON that `/provision` accepts, written compactly from the parsed keys rather than copied from the request: `kty`, `crv`, `kid` if one was given, `key_ops`, `d`, `x`, `y`.
+
+- **Without a password:** format version `1`, the payload in plaintext.
 
   | Offset | Size | Field |
   |---|---|---|
-  | 0 | 1 | format version, `1` |
-  | 1 | 4 | PBKDF2 iterations |
-  | 5 | 16 | random salt |
-  | 21 | 12 | random GCM nonce |
-  | 33 | n | ciphertext of the `{"keys": [...]}` JSON |
-  | 33+n | 16 | GCM tag |
+  | 0 | 4 | magic number, `TANG` |
+  | 4 | 1 | format version, `1` |
+  | 5 | n | the `{"keys": [...]}` JSON |
+
+- **With `require_password`:** format version `2`, the payload encrypted. All integers are big-endian.
+
+  | Offset | Size | Field |
+  |---|---|---|
+  | 0 | 4 | magic number, `TANG` |
+  | 4 | 1 | format version, `2` |
+  | 5 | 4 | PBKDF2 iterations |
+  | 9 | 16 | random salt |
+  | 25 | 12 | random GCM nonce |
+  | 37 | n | ciphertext of the `{"keys": [...]}` JSON |
+  | 37+n | 16 | GCM tag |
 
   - **Key derivation:** PBKDF2-HMAC-SHA256(password, salt, iterations) produces a 32-byte AES-256-GCM key.
-  - **Additional authenticated data:** bytes 0–32 (the header), so the version and parameters cannot be changed without failing the tag check.
+  - **Additional authenticated data:** bytes 0–36 (the header), so the version and parameters cannot be changed without failing the tag check.
   - **Wrong password:** the GCM tag check fails. The device cannot tell a wrong password from a corrupted record, and treats both as an authentication failure.
   - **When it runs:** encryption runs once, on the first `/activate`, which also generates the salt and nonce on the device. Decryption runs on every later `/activate`. Both use mbedTLS. The password is never stored.
 
@@ -110,7 +123,7 @@ Both payloads are the same JSON `/provision` accepts, so every path goes through
 
 A later format version can add per-key flags, such as `advertise: false`, for rotation.
 
-**Loading the record at boot.** The record also starts with a fixed magic number. The component ignores the record if:
+**Loading the record at boot.** The component ignores the record if:
 - it cannot be read;
 - the magic number is wrong;
 - the format version is unknown;
@@ -233,7 +246,7 @@ Some of these notes come from an earlier ESPHome port (cherjr/esp32-tang, branch
 - **No web server login.** The handler is registered with `add_handler_without_auth()`. `add_handler()` would put it behind `web_server`'s `auth:` when that is configured, and Clevis cannot log in. `admin_token` is the component's own protection.
 - **Starting the server.** `web_server_base` only listens once a consumer calls `init()`. `web_server` and `captive_portal` do so, but the component may be the only consumer, so its `setup()` calls `init()` itself. `init()` is reference-counted, so this is safe alongside the others.
 - **Client IP.** The request type has no remote address. `last_client_ip` comes from `getpeername()` on `httpd_req_to_sockfd()`.
-- **Two threads.** Handlers run in the httpd task, while timers, actions, buttons and entities run in ESPHome's main loop. A mutex guards the keys and the state. Everything that ESPHome expects on the main loop is handed over with `defer()`: firing triggers, publishing entity states and writing preferences. `captive_portal` defers its NVS writes the same way.
+- **Two threads.** Handlers run in the httpd task, while timers, actions, buttons and entities run in ESPHome's main loop. A mutex guards the keys and the state. Everything that ESPHome expects on the main loop is handed over with `defer()`: firing triggers and publishing entity states. The key record is written through the NVS API, which is thread-safe, so the httpd task writes it directly (see [Stored key format](#stored-key-format)).
 - **Stack size.** The httpd task has a 4352-byte stack (`HTTPD_DEFAULT_CONFIG()` plus 256 bytes), and ESPHome offers no option to change it. The old firmware ran its P-521 operations on an 8 KB stack. Large buffers stay off the stack, and the stack high-water mark is measured during `/adv` and `/rec`. If it does not fit, the crypto moves to a dedicated task with its own stack.
 
 A `password` in the `/activate` body is required with `require_password` and rejected without it. A 400 for a mismatch makes a wrong setup obvious, instead of silently storing keys in a way the user did not expect.

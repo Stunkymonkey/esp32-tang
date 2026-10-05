@@ -9,6 +9,7 @@
 #include "esphome/core/optional.h"
 
 #include "http_handler.h"
+#include "key_store.h"
 #include "tang_crypto.h"
 
 namespace esphome::tang_server {
@@ -42,13 +43,23 @@ class TangServer : public Component {
   Result adv(const std::string &thp);
   Result rec(const std::string &thp, const std::vector<uint8_t> &body);
   Result provision(const std::vector<uint8_t> &body);
+  Result activate(const std::vector<uint8_t> &body);
   Result deactivate();
   Result wipe();
   Result status(bool detailed);
 
  protected:
-  /// Drops the keys from RAM. Callers hold the mutex.
+  /// Loads stored keys at boot and, without require_password, activates them.
+  void load_at_boot_();
+
+  // Callers hold the mutex.
+  /// Reads and checks the stored record into keys_.
+  bool load_stored_keys_(std::string &error);
+  /// Drops the keys from RAM.
   void clear_keys_();
+  /// Short, safe message for the log and the last_error sensor; never key
+  /// material.
+  void set_last_error_(const std::string &error);
   void set_state_(State state);
   Result inactive_result_() const;
 
@@ -60,6 +71,8 @@ class TangServer : public Component {
   Mutex lock_;
   State state_{State::UNPROVISIONED};
   std::vector<TangKey> keys_;
+  KeyStore store_;
+  std::string last_error_;
 };
 
 }  // namespace esphome::tang_server

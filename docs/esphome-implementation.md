@@ -1,6 +1,6 @@
 # Implementation plan: ESPHome `tang_server` component
 
-Status: steps 1 and 2 are done; step 3 is next.
+Status: steps 1 to 3 are done; step 4 is next.
 
 This is the working plan for building the component described in [esphome-component.md](esphome-component.md). The design says *what* the component does. This file says *how to get there from today's `main/`*: the toolchain, what code carries over and what changes in it, and what each step has to show before the next one starts. It is deleted in step 8, together with `main/`.
 
@@ -86,11 +86,13 @@ The numbers match [Implementation order](esphome-component.md#implementation-ord
 
 ### 3. `nvs` storage without a password
 
-- `key_store.h/.cpp`: the record with magic number and format version, plaintext payload, `global_preferences->make_preference<>()` with a fixed hash, `sync()` right after the first `/activate` and after `/wipe`, overwriting with zeros before erasing.
+- `key_store.h/.cpp`: the record with magic number and format version and a plaintext payload, written with the ESP-IDF NVS API in its own namespace and committed right away, overwritten with zeros before it is erased. Not ESPHome's preferences: see [Stored key format](esphome-component.md#stored-key-format).
 - The `pending` and `locked` states, `/activate`, activation at boot, the boot checks of a stored record and `last_error`.
 - `example/tang-nvs.yaml`; `verify_tang.py --storage nvs` with its checks.
 
 **Done when:** the `nvs` checks pass, and `--check-reboot` brings the device back `active` with the same thumbprints.
+
+Done on an ESP32, with the reboot done as a reset through the serial adapter's EN line. Not checked on the device: a record that fails the boot checks, which leaves the device `unprovisioned` with `last_error` set.
 
 ### 4. `require_password`
 

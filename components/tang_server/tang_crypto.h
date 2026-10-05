@@ -93,6 +93,10 @@ int init_rng();
 /// and `error` holds a short message that is safe to log and send.
 bool parse_keys(const char *json, size_t len, std::vector<TangKey> &keys, std::string &error);
 
+/// The keys as a compact `{"keys": [...]}` payload that parse_keys()
+/// accepts, private parts included. The caller wipes the result.
+std::string serialize_keys(const std::vector<TangKey> &keys);
+
 /// Signed advertisement for /adv (empty `thp`) or /adv/<thp>.
 Result build_adv(const std::vector<TangKey> &keys, const std::string &thp);
 

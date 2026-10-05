@@ -469,6 +469,36 @@ bool parse_keys(const char *json, size_t len, std::vector<TangKey> &keys, std::s
   return true;
 }
 
+std::string serialize_keys(const std::vector<TangKey> &keys) {
+  JsonDocument doc(WipingAllocator::instance());
+  JsonArray array = doc["keys"].to<JsonArray>();
+  for (const auto &key : keys) {
+    JsonObject k = array.add<JsonObject>();
+    k["kty"] = "EC";
+    k["crv"] = key.crv();
+    if (!key.kid.empty())
+      k["kid"] = key.kid;
+    if (key.usage == KeyUsage::SIGN) {
+      k["key_ops"].add("sign");
+      k["key_ops"].add("verify");
+    } else {
+      k["key_ops"].add("deriveKey");
+    }
+    std::string d = base64_url_encode(key.private_key, key.key_len);
+    ScopedWipe<std::string> wipe_d{d};
+    k["d"] = d;
+    k["x"] = base64_url_encode(key.public_key, key.key_len);
+    k["y"] = base64_url_encode(key.public_key + key.key_len, key.key_len);
+  }
+
+  // Sized up front, so the string never reallocates and leaves an unwiped
+  // copy of the private keys behind.
+  std::string json;
+  json.reserve(measureJson(doc) + 1);
+  serializeJson(doc, json);
+  return json;
+}
+
 Result build_adv(const std::vector<TangKey> &keys, const std::string &thp) {
   // With a thumbprint, the set is signed by that signing key, and an unknown
   // thumbprint yields 404, as in tangd's find_jws().

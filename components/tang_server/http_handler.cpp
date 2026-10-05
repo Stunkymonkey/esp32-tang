@@ -226,6 +226,9 @@ void HttpHandler::handle_(AsyncWebServerRequest *request) {
       case Route::PROVISION:
         result = this->server_->provision(this->body_);
         break;
+      case Route::ACTIVATE:
+        result = this->server_->activate(this->body_);
+        break;
       case Route::DEACTIVATE:
         result = this->server_->deactivate();
         break;

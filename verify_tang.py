@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Checks a running ESP32 Tang server against the Tang protocol and the
-management API of the ESPHome tang_server component (key_storage: ram).
+management API of the ESPHome tang_server component.
 
-Every run starts with /wipe, so it replaces whatever the device serves."""
+Every run starts with /wipe, so it replaces whatever the device serves and
+erases the keys it has stored."""
 import argparse
 import base64
 import hashlib
 import json
 import sys
+import time
 
 import requests
 from cryptography.hazmat.primitives import hashes
@@ -16,15 +18,22 @@ from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
 
 ESP_IP = ""  # Will be set via arguments
 TOKEN = None  # admin_token, sent as a Bearer token when set
+STORAGE = "ram"  # the device's key_storage
+CHECK_REBOOT = False
 TIMEOUT = 10
 
 
 def parse_args():
-    global ESP_IP, TOKEN
+    global ESP_IP, TOKEN, STORAGE, CHECK_REBOOT
     parser = argparse.ArgumentParser(description='Verify ESP32 Tang Server')
     parser.add_argument('url', help='Base URL of the ESP32 Tang server (e.g., http://192.168.4.1)')
     parser.add_argument('--token', help="the device's admin_token; leave out if none is configured")
+    parser.add_argument('--storage', choices=['ram', 'nvs'], default='ram', help="the device's key_storage")
+    parser.add_argument('--check-reboot', action='store_true',
+                        help='ask for a power cycle and check which keys survive it')
     args = parser.parse_args()
+    STORAGE = args.storage
+    CHECK_REBOOT = args.check_reboot
 
     ESP_IP = args.url.rstrip('/')
     if not ESP_IP.startswith("http"):
@@ -195,20 +204,28 @@ def wipe():
     check_state("unprovisioned")
 
 
-def deactivate():
-    print(f"\n[deactivate] Deactivating {ESP_IP}...")
+def deactivate(expected_state):
+    print(f"\n[deactivate] Deactivating {ESP_IP} (expect {expected_state})...")
     request("POST", "/deactivate", 200)
-    # With key_storage: ram, RAM holds the only copy.
-    check_state("unprovisioned")
+    check_state(expected_state)
+
+
+def activate():
+    print(f"\n[activate] Activating {ESP_IP}...")
+    r = request("POST", "/activate", 200)
+    print(f"Response: {r.text}")
+    check_state("active")
 
 
 # --- Tang protocol ---
 
 def provision(sign_key, exch_key):
+    """Provisioning activates directly with ram. With nvs, the keys wait in
+    RAM, unserved, until the first /activate stores them."""
     print(f"\n[1] Provisioning keys to {ESP_IP}...")
     r = request("POST", "/provision", 200, json_body=provision_payload(sign_key, exch_key))
     print(f"Response: {r.text}")
-    check_state("active")
+    check_state("active" if STORAGE == "ram" else "pending")
 
 
 def verify_second_provision_refused(sign_key, exch_key):
@@ -339,7 +356,34 @@ def perform_exchange(exch_key, hash_name="sha256"):
     print("Shared Secret VALIDATED! (X coordinate matches)")
 
 
-def run_test_suite(curve_name, finish):
+def verify_serving(sign_key, exch_key):
+    verify_advertisement(sign_key)
+    verify_advertisement_paths(sign_key, exch_key)
+    perform_exchange(exch_key, "sha256")
+    perform_exchange(exch_key, "sha1")
+
+
+def provision_and_activate_nvs(sign_key, exch_key):
+    """The nvs path from provision to the first activation, with the
+    checks along the way."""
+    provision(sign_key, exch_key)
+    check_inactive(sign_key, exch_key)
+    verify_second_provision_refused(sign_key, exch_key)
+
+    print("\n[1c] Deactivating while pending drops the keys...")
+    deactivate("unprovisioned")
+    request("POST", "/activate", 409)
+    provision(sign_key, exch_key)
+
+    print("\n[1d] Activating with a password on a device without require_password (expect 400)...")
+    request("POST", "/activate", 400, json_body={"password": "not-expected"})
+    check_state("pending")
+
+    activate()
+    request("POST", "/activate", 409)
+
+
+def run_test_suite(curve_name):
     print(f"\n{'='*20} Testing Curve: {curve_name} {'='*20}")
 
     print("Generating Keys...")
@@ -349,21 +393,72 @@ def run_test_suite(curve_name, finish):
     exch_key = generate_key(["deriveKey"], curve_name)
 
     verify_mismatched_key_rejected(sign_key, exch_key)
-    provision(sign_key, exch_key)
+    if STORAGE == "ram":
+        print("\n[1a] /activate with ram storage (expect 404)...")
+        request("POST", "/activate", 404)
+        provision(sign_key, exch_key)
+    else:
+        provision_and_activate_nvs(sign_key, exch_key)
     verify_second_provision_refused(sign_key, exch_key)
-    verify_advertisement(sign_key)
-    verify_advertisement_paths(sign_key, exch_key)
-    perform_exchange(exch_key, "sha256")
-    perform_exchange(exch_key, "sha1")
+    verify_serving(sign_key, exch_key)
     get_status()  # the detailed view while keys are loaded, checked for "d"
-    finish()
+
+    if STORAGE == "nvs":
+        # The stored keys stay and come back on /activate.
+        deactivate("locked")
+        check_inactive(sign_key, exch_key)
+        verify_second_provision_refused(sign_key, exch_key)
+        activate()
+        verify_serving(sign_key, exch_key)
+
+    # ram holds the only copy, so deactivating leaves nothing.
+    deactivate("unprovisioned" if STORAGE == "ram" else "locked")
     check_inactive(sign_key, exch_key)
+    wipe()
+    check_inactive(sign_key, exch_key)
+    if STORAGE == "nvs":
+        print("\n[wipe] Nothing left to activate (expect 409)...")
+        request("POST", "/activate", 409)
     print(f"{'='*20} {curve_name} Test Complete {'='*20}\n")
+
+
+def wait_for_device(timeout=180):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            requests.get(f"{ESP_IP}/status", timeout=3)
+            return
+        except requests.RequestException:
+            time.sleep(2)
+    fail(f"device did not come back within {timeout} s")
+
+
+def check_reboot():
+    """With nvs, the device activates its stored keys at boot. With ram,
+    they are gone."""
+    print(f"\n{'='*20} Reboot {'='*20}")
+    sign_key = generate_key(["sign", "verify"], "P-256")
+    exch_key = generate_key(["deriveKey"], "P-256")
+    provision(sign_key, exch_key)
+    if STORAGE == "nvs":
+        activate()
+
+    input("\nPower-cycle the device, then press Enter... ")
+    wait_for_device()
+
+    if STORAGE == "ram":
+        check_state("unprovisioned")
+        check_inactive(sign_key, exch_key)
+    else:
+        check_state("active")
+        verify_serving(sign_key, exch_key)
+    wipe()
+    print(f"{'='*20} Reboot Complete {'='*20}\n")
 
 
 if __name__ == "__main__":
     parse_args()
-    print(f"Targeting: {ESP_IP} ({'with' if TOKEN else 'without'} admin token)")
+    print(f"Targeting: {ESP_IP} (key_storage: {STORAGE}, {'with' if TOKEN else 'without'} admin token)")
 
     # Ensure fresh state
     wipe()
@@ -372,8 +467,9 @@ if __name__ == "__main__":
     if TOKEN is not None:
         check_auth()
 
-    # /deactivate and /wipe both leave a ram device unprovisioned; use each once.
-    run_test_suite("P-256", deactivate)
-    run_test_suite("P-521", wipe)
+    run_test_suite("P-256")
+    run_test_suite("P-521")
+    if CHECK_REBOOT:
+        check_reboot()
 
     print("All checks passed.")

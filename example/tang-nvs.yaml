@@ -1,0 +1,33 @@
+# Tang server that stores its keys in NVS, in plaintext. It serves them
+# again after a power loss without any interaction, like tangd. Without
+# flash encryption, anyone holding the device can read the keys.
+esphome:
+  name: tang-nvs
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+external_components:
+  - source:
+      type: local
+      path: ../components
+
+logger:
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+tang_server:
+  key_storage: nvs
+  admin_token: !secret tang_admin_token

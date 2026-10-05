@@ -62,11 +62,6 @@ def _validate(config):
             path=[CONF_PBKDF2_ITERATIONS],
         )
 
-    if config[CONF_KEY_STORAGE] != "ram":
-        raise cv.Invalid(
-            f"{CONF_KEY_STORAGE}: {config[CONF_KEY_STORAGE]} is not implemented yet",
-            path=[CONF_KEY_STORAGE],
-        )
     for key in NOT_IMPLEMENTED:
         if key in config:
             raise cv.Invalid(f"{key} is not implemented yet", path=[key])

@@ -76,10 +76,13 @@ Starts with `/wipe`, then runs the Tang endpoints against the device for both P-
 - It checks that `/adv` and `/rec` answer 503 while no keys are loaded, and that `/deactivate` and `/wipe` leave the device `unprovisioned`.
 - It checks `/status`. With `--token`, it also checks that the management endpoints answer 401 without the token or with a wrong one, and that `/status` without a token shows only the state.
 
-Run it through the flake, which brings the Python dependencies. Pass the device's `admin_token` with `--token`, or leave it out if none is configured:
+- With `--storage nvs`, it checks the `pending` and `locked` states: nothing is served before the first `/activate`, `/deactivate` keeps the stored keys and `/activate` brings the same ones back, and a password on `/activate` is refused.
+- With `--check-reboot`, it provisions keys, asks you to power-cycle the device and checks that they are back (`nvs`) or gone (`ram`).
+
+Run it through the flake, which brings the Python dependencies. Pass the device's `admin_token` with `--token`, or leave it out if none is configured, and its `key_storage` with `--storage` (default `ram`):
 
 ```bash
-nix run .#verify -- http://<esp-ip> --token <admin_token>
+nix run .#verify -- http://<esp-ip> --token <admin_token> --storage nvs
 ```
 
 Inside `nix develop` the same command is available as `verify-tang`. Without Nix, run `python3 verify_tang.py` with `requests` and `cryptography` installed.
