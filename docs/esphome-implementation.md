@@ -1,6 +1,6 @@
 # Implementation plan: ESPHome `tang_server` component
 
-Status: step 1 is done; step 2 is next.
+Status: steps 1 and 2 are done; step 3 is next.
 
 This is the working plan for building the component described in [esphome-component.md](esphome-component.md). The design says *what* the component does. This file says *how to get there from today's `main/`*: the toolchain, what code carries over and what changes in it, and what each step has to show before the next one starts. It is deleted in step 8, together with `main/`.
 

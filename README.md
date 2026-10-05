@@ -69,18 +69,20 @@ Both checks below talk to a real ESP32 on your network and **replace the keys on
 
 ### Protocol check: `verify_tang.py`
 
-Runs the Tang endpoints against the device for both P-256 and P-521:
-- It generates fresh keys and provisions them, and checks that a key whose `d` does not match its `x`/`y` is rejected.
+Starts with `/wipe`, then runs the Tang endpoints against the device for both P-256 and P-521:
+- It generates fresh keys and provisions them, and checks that a key whose `d` does not match its `x`/`y` is rejected, and that a second provision without a wipe gets 409.
 - It verifies the `/adv` signature, and checks that `/adv`, `/adv/` and `/adv/<thp>` behave like tangd (404 for a thumbprint that is not a signing key's).
 - It performs `/rec/<thp>` exchanges using the S256 and S1 thumbprints.
+- It checks that `/adv` and `/rec` answer 503 while no keys are loaded, and that `/deactivate` and `/wipe` leave the device `unprovisioned`.
+- It checks `/status`. With `--token`, it also checks that the management endpoints answer 401 without the token or with a wrong one, and that `/status` without a token shows only the state.
 
-Run it through the flake, which brings the Python dependencies:
+Run it through the flake, which brings the Python dependencies. Pass the device's `admin_token` with `--token`, or leave it out if none is configured:
 
 ```bash
-nix run .#verify -- http://<esp-ip>
+nix run .#verify -- http://<esp-ip> --token <admin_token>
 ```
 
-Inside `nix develop` the same command is available as `verify-tang http://<esp-ip>`. Without Nix, run `python3 verify_tang.py http://<esp-ip>` with `requests` and `cryptography` installed.
+Inside `nix develop` the same command is available as `verify-tang`. Without Nix, run `python3 verify_tang.py` with `requests` and `cryptography` installed.
 
 ### End-to-end check: NixOS VM test
 
