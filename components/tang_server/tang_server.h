@@ -6,6 +6,15 @@
 #include <vector>
 
 #include "esphome/components/web_server_base/web_server_base.h"
+#ifdef USE_BINARY_SENSOR
+#include "esphome/components/binary_sensor/binary_sensor.h"
+#endif
+#ifdef USE_SENSOR
+#include "esphome/components/sensor/sensor.h"
+#endif
+#ifdef USE_TEXT_SENSOR
+#include "esphome/components/text_sensor/text_sensor.h"
+#endif
 #include "esphome/core/component.h"
 #include "esphome/core/helpers.h"
 #include "esphome/core/optional.h"
@@ -88,8 +97,25 @@ class TangServer : public Component {
   void activate_in_background(const std::string *password);
 
   // Events from the HTTP handler, for the triggers.
-  void notify_request(const std::string &path, const char *method, int status);
+  void notify_request(const std::string &path, const char *method, int status, const std::string &client_ip);
   void notify_auth_failure(const std::string &path);
+
+  // Entities. They are published on the main loop.
+#ifdef USE_BINARY_SENSOR
+  void set_active_binary_sensor(binary_sensor::BinarySensor *s) { this->active_binary_sensor_ = s; }
+#endif
+#ifdef USE_SENSOR
+  void set_activation_count_sensor(sensor::Sensor *s) { this->activation_count_sensor_ = s; }
+  void set_recovery_count_sensor(sensor::Sensor *s) { this->recovery_count_sensor_ = s; }
+  void set_adv_count_sensor(sensor::Sensor *s) { this->adv_count_sensor_ = s; }
+  void set_auth_failure_count_sensor(sensor::Sensor *s) { this->auth_failure_count_sensor_ = s; }
+#endif
+#ifdef USE_TEXT_SENSOR
+  void set_state_text_sensor(text_sensor::TextSensor *s) { this->state_text_sensor_ = s; }
+  void set_last_path_text_sensor(text_sensor::TextSensor *s) { this->last_path_text_sensor_ = s; }
+  void set_last_error_text_sensor(text_sensor::TextSensor *s) { this->last_error_text_sensor_ = s; }
+  void set_last_client_ip_text_sensor(text_sensor::TextSensor *s) { this->last_client_ip_text_sensor_ = s; }
+#endif
 
   // Triggers. The callbacks run on the main loop.
   template<typename F> void add_on_activate_callback(F &&f) { this->activate_callback_.add(std::forward<F>(f)); }
@@ -116,6 +142,10 @@ class TangServer : public Component {
   /// Short, safe message for the log and the last_error sensor; never key
   /// material.
   void set_last_error_(const std::string &error);
+  /// Publishes the state, counters and last error. Coalesced: several calls
+  /// before the next loop iteration publish once.
+  void schedule_publish_();
+  void publish_();
   void set_state_(State state);
   Result inactive_result_(const std::string &path);
   /// Every activation attempt, from HTTP or the action. Fires on_activate
@@ -162,20 +192,40 @@ class TangServer : public Component {
   bool setup_done_{false};
   std::vector<TangKey> keys_;
   KeyStore store_;
+  // Guarded by info_lock_, not lock_, so the main loop can read it while an
+  // activation holds lock_.
   std::string last_error_;
+  mutable Mutex info_lock_;
   /// The stored keys while locked without a password, for /status.
   std::vector<KeyInfo> stored_info_;
   uint32_t active_since_ms_{0};
   uint32_t last_recovery_ms_{0};
-  uint32_t activation_count_{0};
-  uint32_t recovery_count_{0};
-  uint32_t adv_count_{0};
+  // Atomic, so the main loop reads them without the lock.
+  std::atomic<uint32_t> activation_count_{0};
+  std::atomic<uint32_t> recovery_count_{0};
+  std::atomic<uint32_t> adv_count_{0};
 
   // Separate from lock_, which /activate holds for seconds while PBKDF2 runs.
   mutable Mutex auth_lock_;
   Backoff token_backoff_;
   Backoff password_backoff_;
-  uint32_t auth_failure_count_{0};
+  std::atomic<uint32_t> auth_failure_count_{0};
+
+#ifdef USE_BINARY_SENSOR
+  binary_sensor::BinarySensor *active_binary_sensor_{nullptr};
+#endif
+#ifdef USE_SENSOR
+  sensor::Sensor *activation_count_sensor_{nullptr};
+  sensor::Sensor *recovery_count_sensor_{nullptr};
+  sensor::Sensor *adv_count_sensor_{nullptr};
+  sensor::Sensor *auth_failure_count_sensor_{nullptr};
+#endif
+#ifdef USE_TEXT_SENSOR
+  text_sensor::TextSensor *state_text_sensor_{nullptr};
+  text_sensor::TextSensor *last_path_text_sensor_{nullptr};
+  text_sensor::TextSensor *last_error_text_sensor_{nullptr};
+  text_sensor::TextSensor *last_client_ip_text_sensor_{nullptr};
+#endif
 
   CallbackManager<void(bool)> activate_callback_;
   CallbackManager<void(const std::string &)> deactivate_callback_;

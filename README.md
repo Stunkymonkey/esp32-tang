@@ -80,7 +80,7 @@ Starts with `/wipe`, then runs the Tang endpoints against the device for both P-
 - With `--password`, for a `require_password` device, it also checks that `/activate` needs the password and that a wrong one gets 401 and leaves the device `locked`. `--password` implies `--storage nvs`.
 - With `--check-timers`, it checks `idle_timeout` and `max_active_time`, reading their values from `/status`. It takes as long as they are set to; `tests/tang-test.yaml` sets them short.
 - With `--check-lockout` (needs `--token`), it checks the auth backoff: 1 s, 2 s, 4 s, … after each wrong token, then the lockout. Running it locks the device for its configured lockout time.
-- `tests/tang-test.yaml` also logs every trigger, and `tests/tang_api.py <host> <api_encryption_key> <action> [password]` runs its API actions (`tang_activate`, `tang_deactivate`, `tang_wipe`, `tang_conditions`) as Home Assistant would.
+- `tests/tang-test.yaml` also logs every trigger and has every entity. `tests/tang_api.py <host> <api_encryption_key> <command>` talks to it through the ESPHome API as Home Assistant would: `run <action> [password]` for its API actions (`tang_activate`, `tang_deactivate`, `tang_wipe`, `tang_conditions`), `entities`, `watch <seconds>`, `press <button name>` and `text <text name> <value>`.
 - With `--check-reboot`, it provisions keys, asks you to power-cycle the device and checks that they are back (`nvs`), waiting for the password (`require_password`) or gone (`ram`).
 
 Run it through the flake, which brings the Python dependencies. Pass the device's `admin_token` with `--token`, or leave it out if none is configured, and its `key_storage` with `--storage` (default `ram`):

@@ -58,6 +58,7 @@ void TangServer::setup() {
   // while loading the stored keys are not reported on their own.
   this->setup_done_ = true;
   this->fire_(this->state_callback_, std::string(state_to_string(this->state_)));
+  this->schedule_publish_();
 }
 
 void TangServer::loop() {
@@ -96,8 +97,11 @@ void TangServer::dump_config() {
                 "  Auth backoff: %u failures, then %" PRIu32 " s lockout\n"
                 "  Flash encryption: %s",
                 this->max_failures_, this->lockout_ms_ / 1000, YESNO(esp_flash_encryption_enabled()));
-  if (!this->last_error_.empty())
-    ESP_LOGCONFIG(TAG, "  Last error: %s", this->last_error_.c_str());
+  {
+    LockGuard guard(this->info_lock_);
+    if (!this->last_error_.empty())
+      ESP_LOGCONFIG(TAG, "  Last error: %s", this->last_error_.c_str());
+  }
 
   if (!this->has_admin_token())
     ESP_LOGW(TAG, "No admin_token: anyone on the network can provision, deactivate and wipe");
@@ -212,6 +216,7 @@ Result TangServer::adv(const std::string &thp) {
   Result result = build_adv(this->keys_, thp);
   if (result.status == 200) {
     this->adv_count_++;
+    this->schedule_publish_();
     this->fire_(this->adv_callback_, thp);
   }
   return result;
@@ -224,6 +229,7 @@ Result TangServer::rec(const std::string &thp, const std::vector<uint8_t> &body)
   Result result = exchange(this->keys_, thp, reinterpret_cast<const char *>(body.data()), body.size());
   if (result.status == 200) {
     this->recovery_count_++;
+    this->schedule_publish_();
     // Only a successful recovery restarts the idle timer.
     this->last_recovery_ms_ = millis();
   }
@@ -452,9 +458,9 @@ Result TangServer::status(bool detailed) {
     }
 
     JsonObject counters = doc["counters"].to<JsonObject>();
-    counters["activation"] = this->activation_count_;
-    counters["recovery"] = this->recovery_count_;
-    counters["adv"] = this->adv_count_;
+    counters["activation"] = this->activation_count_.load();
+    counters["recovery"] = this->recovery_count_.load();
+    counters["adv"] = this->adv_count_.load();
     counters["auth_failure"] = auth_failure_count;
   }
 
@@ -491,8 +497,10 @@ uint32_t TangServer::auth_blocked_ms(bool token, bool password) {
     blocked = std::max(blocked, this->blocked_ms_(this->token_backoff_, now));
   if (password)
     blocked = std::max(blocked, this->blocked_ms_(this->password_backoff_, now));
-  if (blocked != 0)
+  if (blocked != 0) {
     this->auth_failure_count_++;
+    this->schedule_publish_();
+  }
   return blocked;
 }
 
@@ -507,6 +515,7 @@ void TangServer::auth_result(Secret secret, bool ok) {
     backoff.failures++;
   backoff.last_failure_ms = millis();
   this->auth_failure_count_++;
+  this->schedule_publish_();
   uint32_t wait = this->blocked_ms_(backoff, backoff.last_failure_ms);
   ESP_LOGW(TAG, "Wrong %s (%u in a row): next attempt in %" PRIu32 " s",
            secret == Secret::TOKEN ? "token" : "password", backoff.failures, (wait + 999) / 1000);
@@ -522,7 +531,50 @@ void TangServer::clear_keys_() {
 
 void TangServer::set_last_error_(const std::string &error) {
   ESP_LOGW(TAG, "%s", error.c_str());
-  this->last_error_ = error;
+  {
+    LockGuard guard(this->info_lock_);
+    this->last_error_ = error;
+  }
+  this->schedule_publish_();
+}
+
+void TangServer::schedule_publish_() {
+  // Named, so a burst of changes replaces the pending publish instead of
+  // queueing one per change.
+  this->defer("publish", [this]() { this->publish_(); });
+}
+
+void TangServer::publish_() {
+  State state = this->state_;
+#ifdef USE_BINARY_SENSOR
+  if (this->active_binary_sensor_ != nullptr)
+    this->active_binary_sensor_->publish_state(state == State::ACTIVE);
+#endif
+#ifdef USE_SENSOR
+  // Counters start from zero at every boot, as total_increasing sensors.
+  if (this->activation_count_sensor_ != nullptr)
+    this->activation_count_sensor_->publish_state(this->activation_count_);
+  if (this->recovery_count_sensor_ != nullptr)
+    this->recovery_count_sensor_->publish_state(this->recovery_count_);
+  if (this->adv_count_sensor_ != nullptr)
+    this->adv_count_sensor_->publish_state(this->adv_count_);
+  if (this->auth_failure_count_sensor_ != nullptr)
+    this->auth_failure_count_sensor_->publish_state(this->auth_failure_count_);
+#endif
+#ifdef USE_TEXT_SENSOR
+  if (this->state_text_sensor_ != nullptr)
+    this->state_text_sensor_->publish_state(state_to_string(state));
+  if (this->last_error_text_sensor_ != nullptr) {
+    std::string error;
+    {
+      LockGuard guard(this->info_lock_);
+      error = this->last_error_;
+    }
+    // Only when it changed, so Home Assistant keeps the time it happened.
+    if (!this->last_error_text_sensor_->has_state() || this->last_error_text_sensor_->get_state() != error)
+      this->last_error_text_sensor_->publish_state(error);
+  }
+#endif
 }
 
 void TangServer::set_state_(State state) {
@@ -530,8 +582,10 @@ void TangServer::set_state_(State state) {
     return;
   ESP_LOGI(TAG, "State: %s -> %s", state_to_string(this->state_), state_to_string(state));
   this->state_ = state;
-  if (this->setup_done_)
+  if (this->setup_done_) {
     this->fire_(this->state_callback_, std::string(state_to_string(state)));
+    this->schedule_publish_();
+  }
   if (state == State::ACTIVE) {
     // Every way of becoming active counts as one activation and starts
     // both timers.
@@ -545,8 +599,19 @@ void TangServer::set_state_(State state) {
 
 namespace esphome::tang_server {
 
-void TangServer::notify_request(const std::string &path, const char *method, int status) {
+void TangServer::notify_request(const std::string &path, const char *method, int status,
+                                const std::string &client_ip) {
   this->fire_(this->request_callback_, path, std::string(method), status);
+#ifdef USE_TEXT_SENSOR
+  if (this->last_path_text_sensor_ != nullptr || this->last_client_ip_text_sensor_ != nullptr) {
+    this->defer([this, path, client_ip]() {
+      if (this->last_path_text_sensor_ != nullptr)
+        this->last_path_text_sensor_->publish_state(path);
+      if (this->last_client_ip_text_sensor_ != nullptr && !client_ip.empty())
+        this->last_client_ip_text_sensor_->publish_state(client_ip);
+    });
+  }
+#endif
 }
 
 void TangServer::notify_auth_failure(const std::string &path) { this->fire_(this->auth_failure_callback_, path); }

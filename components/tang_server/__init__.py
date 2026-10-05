@@ -10,6 +10,7 @@ CODEOWNERS = ["@Stunkymonkey"]
 DEPENDENCIES = ["network"]
 AUTO_LOAD = ["web_server_base", "json"]
 
+CONF_TANG_SERVER_ID = "tang_server_id"
 CONF_KEY_STORAGE = "key_storage"
 CONF_REQUIRE_PASSWORD = "require_password"
 CONF_PBKDF2_ITERATIONS = "pbkdf2_iterations"
@@ -150,22 +151,19 @@ TANG_SERVER_ID_SCHEMA = automation.maybe_simple_id(
 )
 
 
-def _check_activate_password(has_password):
-    """tang_server.activate takes a password exactly when the component
-    requires one, like /activate. One tang_server per device, so its
-    configuration is CORE.config["tang_server"]."""
+def check_activate_password(has_password, what="tang_server.activate", option="a password"):
+    """Activation takes a password exactly when the component requires one,
+    like /activate. An action's or entity's schema cannot see the component's
+    configuration, so this runs in their code generation. One tang_server per
+    device, so its configuration is CORE.config["tang_server"]."""
     server = CORE.config["tang_server"]
     if server[CONF_KEY_STORAGE] != "nvs":
-        raise EsphomeError("tang_server.activate needs key_storage: nvs")
+        raise EsphomeError(f"{what} needs key_storage: nvs")
     required = server.get(CONF_REQUIRE_PASSWORD, False)
     if required and not has_password:
-        raise EsphomeError(
-            "tang_server.activate needs a password: tang_server has require_password"
-        )
+        raise EsphomeError(f"{what} needs {option}: tang_server has require_password")
     if has_password and not required:
-        raise EsphomeError(
-            "tang_server.activate takes no password: tang_server has no require_password"
-        )
+        raise EsphomeError(f"{what} takes no {option.removeprefix('a ')}: tang_server has no require_password")
 
 
 @automation.register_action(
@@ -181,7 +179,7 @@ def _check_activate_password(has_password):
     synchronous=True,
 )
 async def activate_action_to_code(config, action_id, template_arg, args):
-    _check_activate_password(CONF_PASSWORD in config)
+    check_activate_password(CONF_PASSWORD in config)
     parent = await cg.get_variable(config[CONF_ID])
     var = cg.new_Pvariable(action_id, template_arg, parent)
     if CONF_PASSWORD in config:

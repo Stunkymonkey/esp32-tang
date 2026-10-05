@@ -30,3 +30,22 @@ wifi:
 tang_server:
   key_storage: ram
   admin_token: !secret tang_admin_token
+
+binary_sensor:
+  - platform: tang_server
+    active:
+      name: Tang active
+
+text_sensor:
+  - platform: tang_server
+    state:
+      name: Tang state
+    last_error:
+      name: Tang last error
+
+button:
+  - platform: tang_server
+    deactivate:
+      name: Tang deactivate
+    wipe:
+      name: Tang wipe

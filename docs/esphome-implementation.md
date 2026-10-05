@@ -1,6 +1,6 @@
 # Implementation plan: ESPHome `tang_server` component
 
-Status: steps 1 to 6 are done; step 7 is next.
+Status: steps 1 to 7 are done; step 8 is next.
 
 This is the working plan for building the component described in [esphome-component.md](esphome-component.md). The design says *what* the component does. This file says *how to get there from today's `main/`*: the toolchain, what code carries over and what changes in it, and what each step has to show before the next one starts. Where the work differs from the plan, [Deviations from the plan](#deviations-from-the-plan) records how and why; step 8 moves that section into the design. This file is deleted in step 8, together with `main/`.
 
@@ -131,6 +131,8 @@ Done on an ESP32 with `tests/tang-test.yaml`. A `verify_tang.py --password --che
 
 **Done when:** all entities show up in Home Assistant and follow a `verify_tang.py` run.
 
+Done on an ESP32 with `tests/tang-test.yaml`, through the ESPHome native API that Home Assistant uses, with `tests/tang_api.py`. All entities show up with their state. During a `verify_tang.py --password --check-lockout` run, `Tang state` went through all four states, `Tang active` followed it, and the counters and `Tang last path` counted along. The activate button unlocked the device with the password text, refused a wrong one with 401, and cleared the text both times; the deactivate and wipe buttons worked. The build fails for an activate button whose `password_id` does not match `require_password`. The httpd stack low point is 816 bytes unused, on a rejected `/provision`.
+
 ### 8. Clean-up
 
 - `tests/luks-clevis.nix`: `TANG_TOKEN` and `TANG_PASSWORD`; `/wipe` before provisioning; `curl --json` for `/provision`; `-d ''` for empty POSTs. Today's bare `curl -X POST .../deactivate` sends no `Content-Length` and gets 411 from ESPHome.
@@ -211,6 +213,17 @@ Where the work differs from this plan or from the design as it stood before the 
 - **`on_state_change` at boot fires once, with the state after loading the stored keys.** The changes while loading are not reported on their own. Design updated.
 - **`on_auth_failure` from the action has the path `tang_server.activate`.** The design did not say. Design updated.
 - **`tests/tang-short-timers.yaml` became `tests/tang-test.yaml`**, with a log line for every trigger and API actions for the actions and conditions. `tests/tang_api.py` calls those actions through the ESPHome API, as Home Assistant would.
+
+### Step 7
+
+- **Checked through the ESPHome native API, not in Home Assistant.** No Home Assistant instance was at hand. `tests/tang_api.py` uses `aioesphomeapi`, the library Home Assistant's ESPHome integration is built on, to list the entities, watch their states, press the buttons and set the password text.
+- **Entities show the latest state, not every change.** Publishing goes through one named `defer()`, so changes within one loop iteration are published once, and a state that lasts only milliseconds can be skipped. The triggers still report every change. Design updated.
+- **The counters are atomics, and `last_error` has its own mutex**, so the main loop can publish them while an activation holds the lock for seconds.
+- **The activate button clears the text right away on the press**, not after the attempt: the activation runs in the background, and the password is copied before. It also wipes the text entity's own copy of the string. Design updated.
+- **The `password_id` check runs at build time**, like the action's password check. Design updated.
+- **`last_error` was not exercised in this step's run**, because nothing in it fails in a way that sets it. Step 4 showed a boot error in the log and `dump_config()`; the entity uses the same value.
+- **The examples gained entities**: the active binary sensor, the state and last error text sensors, and the buttons. `tang-nvs-password.yaml` also has the API action and the password text for unlocking from Home Assistant.
+- **`tests/tang_api.py` has subcommands now**: `run`, `entities`, `watch`, `press` and `text`.
 
 ## Risks to check early
 

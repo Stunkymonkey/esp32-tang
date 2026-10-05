@@ -5,6 +5,7 @@
 #include <cstring>
 
 #include <esp_http_server.h>
+#include <lwip/sockets.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
@@ -109,6 +110,33 @@ __attribute__((noinline)) Target resolve(AsyncWebServerRequest *request) {
   return target;
 }
 
+/// The client's address, for last_client_ip. The request type has none, so
+/// it comes from the socket. Out of line, so its buffers are off the stack
+/// while the request is handled.
+__attribute__((noinline)) std::string client_ip(httpd_req_t *req) {
+  struct sockaddr_storage addr {};
+  socklen_t len = sizeof(addr);
+  if (getpeername(httpd_req_to_sockfd(req), reinterpret_cast<struct sockaddr *>(&addr), &len) != 0)
+    return {};
+  char buf[48] = {};
+  if (addr.ss_family == AF_INET) {
+    inet_ntop(AF_INET, &reinterpret_cast<struct sockaddr_in *>(&addr)->sin_addr, buf, sizeof(buf));
+#if LWIP_IPV6
+  } else if (addr.ss_family == AF_INET6) {
+    const auto *a6 = reinterpret_cast<struct sockaddr_in6 *>(&addr);
+    const uint8_t *b = reinterpret_cast<const uint8_t *>(&a6->sin6_addr);
+    static constexpr uint8_t V4_MAPPED[12] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff};
+    if (memcmp(b, V4_MAPPED, sizeof(V4_MAPPED)) == 0) {
+      // An IPv4 client on a dual-stack socket: show the IPv4 address.
+      inet_ntop(AF_INET, b + 12, buf, sizeof(buf));
+    } else {
+      inet_ntop(AF_INET6, &a6->sin6_addr, buf, sizeof(buf));
+    }
+#endif
+  }
+  return buf;
+}
+
 const char *method_name(http_method method) {
   return method == HTTP_GET ? "GET" : method == HTTP_POST ? "POST" : http_method_str(method);
 }
@@ -149,8 +177,8 @@ void HttpHandler::handleRequest(AsyncWebServerRequest *request) {
   const char *method = method_name(request->method());
   int status = this->handle_(request, target);
   this->reset_body_();
-  // After the response is sent, for on_request.
-  this->server_->notify_request(target.path, method, status);
+  // After the response is sent, for on_request and the entities.
+  this->server_->notify_request(target.path, method, status, client_ip(*request));
 }
 
 int HttpHandler::handle_(AsyncWebServerRequest *request, const Target &target) {

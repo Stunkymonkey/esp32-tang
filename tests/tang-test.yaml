@@ -2,7 +2,7 @@
 # cheap PBKDF2, so verify_tang.py --check-timers and --check-lockout finish
 # in minutes. Every trigger logs a "TRIGGER" line, and the API actions run
 # the tang_server actions and log the conditions (see
-# tests/tang_api.py). Not for real use.
+# tests/tang_api.py). It also has every entity and button. Not for real use.
 #
 # Uses the examples' secrets: ln -s ../example/secrets.yaml tests/secrets.yaml
 esphome:
@@ -109,3 +109,47 @@ tang_server:
     - logger.log:
         format: "TRIGGER on_rejected path=%s reason=%s"
         args: [path.c_str(), reason.c_str()]
+
+binary_sensor:
+  - platform: tang_server
+    active:
+      name: Tang active
+
+sensor:
+  - platform: tang_server
+    activation_count:
+      name: Tang activations
+    recovery_count:
+      name: Tang recoveries
+    adv_count:
+      name: Tang advertisements
+    auth_failure_count:
+      name: Tang auth failures
+
+text_sensor:
+  - platform: tang_server
+    state:
+      name: Tang state
+    last_path:
+      name: Tang last path
+    last_error:
+      name: Tang last error
+    last_client_ip:
+      name: Tang last client
+
+text:
+  - platform: template
+    id: tang_password
+    name: Tang key password
+    mode: password
+    optimistic: true
+
+button:
+  - platform: tang_server
+    deactivate:
+      name: Tang deactivate
+    wipe:
+      name: Tang wipe
+    activate:
+      name: Tang activate
+      password_id: tang_password
