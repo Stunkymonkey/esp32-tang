@@ -1,5 +1,6 @@
 #include "tang_server.h"
 
+#include <cinttypes>
 #include <cstring>
 #include <strings.h>
 
@@ -24,6 +25,14 @@ const char *state_to_string(State state) {
 }
 
 void TangServer::setup() {
+  {
+    // Seeding gathers entropy, the deepest call in the crypto code. Done
+    // here on the main loop's stack rather than on the first request in the
+    // httpd task, whose stack is small.
+    LockGuard guard(this->lock_);
+    if (init_rng() != 0)
+      this->set_last_error_("Cannot seed the random number generator");
+  }
   if (this->key_storage_ == KeyStorage::NVS)
     this->load_at_boot_();
 
@@ -39,10 +48,13 @@ void TangServer::dump_config() {
   ESP_LOGCONFIG(TAG,
                 "Tang server:\n"
                 "  Key storage: %s\n"
+                "  Require password: %s\n"
                 "  Admin token: %s\n"
                 "  State: %s",
-                this->key_storage_ == KeyStorage::RAM ? "ram" : "nvs", YESNO(this->has_admin_token()),
-                state_to_string(this->state_));
+                this->key_storage_ == KeyStorage::RAM ? "ram" : "nvs", YESNO(this->require_password_),
+                YESNO(this->has_admin_token()), state_to_string(this->state_));
+  if (this->require_password_)
+    ESP_LOGCONFIG(TAG, "  PBKDF2 iterations: %" PRIu32, this->pbkdf2_iterations_);
   if (!this->last_error_.empty())
     ESP_LOGCONFIG(TAG, "  Last error: %s", this->last_error_.c_str());
 }
@@ -59,12 +71,31 @@ void TangServer::load_at_boot_() {
     return;
   }
 
-  // Without require_password, stored keys activate themselves, like tangd
-  // after a reboot. A record that fails the checks is left in NVS, so a
-  // firmware downgrade does not destroy what a newer version wrote; /wipe or
-  // the next store replaces it.
+  // A record that fails the checks is left in NVS, so a firmware downgrade
+  // or a config change does not destroy it; /wipe or the next store
+  // replaces it.
   std::string error;
-  if (!this->load_stored_keys_(error)) {
+  KeyStore::LoadResult result = this->load_stored_keys_(error, nullptr);
+  if (this->require_password_) {
+    // An encrypted record can only be checked with the password, on
+    // /activate.
+    if (result == KeyStore::LoadResult::NEEDS_PASSWORD) {
+      ESP_LOGI(TAG, "Stored keys are encrypted; waiting for /activate");
+      this->set_state_(State::LOCKED);
+      return;
+    }
+    this->clear_keys_();
+    if (result == KeyStore::LoadResult::OK)
+      error = "they are not encrypted, but require_password is set. Wipe and provision again";
+    this->set_last_error_("Stored keys ignored: " + error);
+    return;
+  }
+
+  // Without require_password, stored keys activate themselves, like tangd
+  // after a reboot.
+  if (result == KeyStore::LoadResult::NEEDS_PASSWORD)
+    error = "they are encrypted, but require_password is not set";
+  if (result != KeyStore::LoadResult::OK) {
     this->set_last_error_("Stored keys ignored: " + error);
     return;
   }
@@ -72,19 +103,17 @@ void TangServer::load_at_boot_() {
   this->set_state_(State::ACTIVE);
 }
 
-bool TangServer::load_stored_keys_(std::string &error) {
+KeyStore::LoadResult TangServer::load_stored_keys_(std::string &error, const std::string *password) {
   std::vector<uint8_t> payload;
   ScopedWipe<std::vector<uint8_t>> wipe_payload{payload};
-  switch (this->store_.load(payload, error)) {
-    case KeyStore::LoadResult::ABSENT:
-      error = "No stored keys";
-      return false;
-    case KeyStore::LoadResult::ERROR:
-      return false;
-    case KeyStore::LoadResult::OK:
-      break;
-  }
-  return parse_keys(reinterpret_cast<const char *>(payload.data()), payload.size(), this->keys_, error);
+  KeyStore::LoadResult result = this->store_.load(payload, error, password);
+  if (result == KeyStore::LoadResult::ABSENT)
+    error = "No stored keys";
+  if (result != KeyStore::LoadResult::OK)
+    return result;
+  if (!parse_keys(reinterpret_cast<const char *>(payload.data()), payload.size(), this->keys_, error))
+    return KeyStore::LoadResult::ERROR;
+  return KeyStore::LoadResult::OK;
 }
 
 // After Wi-Fi, like web_server: httpd needs the network stack.
@@ -164,26 +193,48 @@ Result TangServer::provision(const std::vector<uint8_t> &body) {
 Result TangServer::activate(const std::vector<uint8_t> &body) {
   LockGuard guard(this->lock_);
 
-  // The body is empty without require_password. A password is refused, so a
-  // wrong setup shows up instead of storing keys in an unexpected way.
+  // {"password": "..."} with require_password, else no body. A mismatch is
+  // refused, so a wrong setup shows up instead of storing keys in a way the
+  // user did not expect.
+  std::string password;
+  ScopedWipe<std::string> wipe_password{password};
+  bool has_password = false;
   if (!body.empty()) {
     JsonDocument doc(WipingAllocator::instance());
     if (deserializeJson(doc, reinterpret_cast<const char *>(body.data()), body.size()) || !doc.is<JsonObject>())
       return Result::text(400, "Invalid JSON");
-    if (!doc["password"].isNull())
-      return Result::text(400, "This device has no require_password; send no password");
+    JsonVariantConst value = doc["password"];
+    has_password = !value.isNull();
+    if (has_password) {
+      if (!value.is<const char *>())
+        return Result::text(400, "The password must be a string");
+      const char *p = value.as<const char *>();
+      password.reserve(strlen(p));
+      password = p;
+    }
   }
+  // Nothing to activate comes first, so the password is not sent for nothing.
+  if (this->state_ == State::ACTIVE)
+    return Result::text(409, "Already active.");
+  if (this->state_ == State::UNPROVISIONED)
+    return Result::text(409, "No keys to activate. Provision first.");
+  if (has_password && !this->require_password_)
+    return Result::text(400, "This device has no require_password; send no password");
+  if (this->require_password_ && password.empty())
+    return Result::text(400, "This device has require_password; send {\"password\": \"...\"}");
+  const std::string *key_password = this->require_password_ ? &password : nullptr;
 
   std::string error;
   switch (this->state_) {
     case State::ACTIVE:
-      return Result::text(409, "Already active.");
     case State::UNPROVISIONED:
-      return Result::text(409, "No keys to activate. Provision first.");
+      break;  // answered above
     case State::PENDING: {
       std::string payload = serialize_keys(this->keys_);
       ScopedWipe<std::string> wipe_payload{payload};
-      if (!this->store_.store(payload, error)) {
+      // The first activation decides the password. There is no confirmation:
+      // a mistyped one locks the stored keys away until /wipe.
+      if (!this->store_.store(payload, error, key_password, this->pbkdf2_iterations_)) {
         this->set_last_error_(error);
         return {500, "text/plain", error};
       }
@@ -192,9 +243,16 @@ Result TangServer::activate(const std::vector<uint8_t> &body) {
       return Result::text(200, "Keys stored and active.");
     }
     case State::LOCKED:
-      if (!this->load_stored_keys_(error)) {
-        this->set_last_error_("Cannot activate: " + error);
-        return {500, "text/plain", error};
+      switch (this->load_stored_keys_(error, key_password)) {
+        case KeyStore::LoadResult::OK:
+          break;
+        case KeyStore::LoadResult::WRONG_PASSWORD:
+          // A corrupt record looks the same; the tag check cannot tell.
+          ESP_LOGW(TAG, "/activate: wrong password");
+          return Result::text(401, "Wrong password");
+        default:
+          this->set_last_error_("Cannot activate: " + error);
+          return {500, "text/plain", error};
       }
       ESP_LOGI(TAG, "Activated: %zu stored keys loaded", this->keys_.size());
       this->set_state_(State::ACTIVE);

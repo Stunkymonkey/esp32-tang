@@ -19,20 +19,28 @@ from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
 ESP_IP = ""  # Will be set via arguments
 TOKEN = None  # admin_token, sent as a Bearer token when set
 STORAGE = "ram"  # the device's key_storage
+PASSWORD = None  # the key password of a require_password device
 CHECK_REBOOT = False
 TIMEOUT = 10
 
 
 def parse_args():
-    global ESP_IP, TOKEN, STORAGE, CHECK_REBOOT
+    global ESP_IP, TOKEN, STORAGE, PASSWORD, CHECK_REBOOT
     parser = argparse.ArgumentParser(description='Verify ESP32 Tang Server')
     parser.add_argument('url', help='Base URL of the ESP32 Tang server (e.g., http://192.168.4.1)')
     parser.add_argument('--token', help="the device's admin_token; leave out if none is configured")
-    parser.add_argument('--storage', choices=['ram', 'nvs'], default='ram', help="the device's key_storage")
+    parser.add_argument('--storage', choices=['ram', 'nvs'],
+                        help="the device's key_storage (default: ram, or nvs with --password)")
+    parser.add_argument('--password',
+                        help='key password for a require_password device; implies --storage nvs. '
+                             'The first /activate of each run sets it.')
     parser.add_argument('--check-reboot', action='store_true',
                         help='ask for a power cycle and check which keys survive it')
     args = parser.parse_args()
-    STORAGE = args.storage
+    PASSWORD = args.password
+    if PASSWORD is not None and args.storage == 'ram':
+        parser.error('--password needs --storage nvs')
+    STORAGE = args.storage or ('nvs' if PASSWORD is not None else 'ram')
     CHECK_REBOOT = args.check_reboot
 
     ESP_IP = args.url.rstrip('/')
@@ -46,7 +54,7 @@ def fail(message):
     sys.exit(1)
 
 
-def request(method, path, expected, json_body=None, token=True):
+def request(method, path, expected, json_body=None, token=True, timeout=TIMEOUT):
     """Sends a request and fails unless it returns `expected`.
 
     Bodies always go through `json=`, so they carry Content-Type and
@@ -59,7 +67,7 @@ def request(method, path, expected, json_body=None, token=True):
     if token is not None:
         headers["Authorization"] = f"Bearer {token}"
     try:
-        r = requests.request(method, f"{ESP_IP}{path}", json=json_body, headers=headers, timeout=TIMEOUT)
+        r = requests.request(method, f"{ESP_IP}{path}", json=json_body, headers=headers, timeout=timeout)
     except Exception as e:
         fail(f"{method} {path}: {e}")
     if r.status_code != expected:
@@ -210,10 +218,19 @@ def deactivate(expected_state):
     check_state(expected_state)
 
 
+def activate_request(expected, password=None):
+    """/activate, with a password in the body if one is given. With
+    require_password it runs PBKDF2, which takes seconds."""
+    body = None if password is None else {"password": password}
+    start = time.monotonic()
+    r = request("POST", "/activate", expected, json_body=body, timeout=120)
+    print(f"/activate -> {r.status_code} in {time.monotonic() - start:.1f} s: {r.text}")
+    return r
+
+
 def activate():
     print(f"\n[activate] Activating {ESP_IP}...")
-    r = request("POST", "/activate", 200)
-    print(f"Response: {r.text}")
+    activate_request(200, PASSWORD)
     check_state("active")
 
 
@@ -375,8 +392,12 @@ def provision_and_activate_nvs(sign_key, exch_key):
     request("POST", "/activate", 409)
     provision(sign_key, exch_key)
 
-    print("\n[1d] Activating with a password on a device without require_password (expect 400)...")
-    request("POST", "/activate", 400, json_body={"password": "not-expected"})
+    if PASSWORD is None:
+        print("\n[1d] Activating with a password on a device without require_password (expect 400)...")
+        activate_request(400, "not-expected")
+    else:
+        print("\n[1d] Activating without a password on a require_password device (expect 400)...")
+        activate_request(400)
     check_state("pending")
 
     activate()
@@ -408,6 +429,11 @@ def run_test_suite(curve_name):
         deactivate("locked")
         check_inactive(sign_key, exch_key)
         verify_second_provision_refused(sign_key, exch_key)
+        if PASSWORD is not None:
+            print("\n[locked] Activating with a wrong password (expect 401)...")
+            activate_request(401, "wrong-" + PASSWORD)
+            check_state("locked")
+            check_inactive(sign_key, exch_key)
         activate()
         verify_serving(sign_key, exch_key)
 
@@ -434,8 +460,8 @@ def wait_for_device(timeout=180):
 
 
 def check_reboot():
-    """With nvs, the device activates its stored keys at boot. With ram,
-    they are gone."""
+    """With nvs, the device activates its stored keys at boot, or waits for
+    the password with require_password. With ram, they are gone."""
     print(f"\n{'='*20} Reboot {'='*20}")
     sign_key = generate_key(["sign", "verify"], "P-256")
     exch_key = generate_key(["deriveKey"], "P-256")
@@ -449,6 +475,12 @@ def check_reboot():
     if STORAGE == "ram":
         check_state("unprovisioned")
         check_inactive(sign_key, exch_key)
+    elif PASSWORD is not None:
+        # A require_password device waits for the password after a reboot.
+        check_state("locked")
+        check_inactive(sign_key, exch_key)
+        activate()
+        verify_serving(sign_key, exch_key)
     else:
         check_state("active")
         verify_serving(sign_key, exch_key)
@@ -458,7 +490,8 @@ def check_reboot():
 
 if __name__ == "__main__":
     parse_args()
-    print(f"Targeting: {ESP_IP} (key_storage: {STORAGE}, {'with' if TOKEN else 'without'} admin token)")
+    print(f"Targeting: {ESP_IP} (key_storage: {STORAGE}, {'with' if PASSWORD else 'without'} password, "
+          f"{'with' if TOKEN else 'without'} admin token)")
 
     # Ensure fresh state
     wipe()

@@ -77,7 +77,8 @@ Starts with `/wipe`, then runs the Tang endpoints against the device for both P-
 - It checks `/status`. With `--token`, it also checks that the management endpoints answer 401 without the token or with a wrong one, and that `/status` without a token shows only the state.
 
 - With `--storage nvs`, it checks the `pending` and `locked` states: nothing is served before the first `/activate`, `/deactivate` keeps the stored keys and `/activate` brings the same ones back, and a password on `/activate` is refused.
-- With `--check-reboot`, it provisions keys, asks you to power-cycle the device and checks that they are back (`nvs`) or gone (`ram`).
+- With `--password`, for a `require_password` device, it also checks that `/activate` needs the password and that a wrong one gets 401 and leaves the device `locked`. `--password` implies `--storage nvs`.
+- With `--check-reboot`, it provisions keys, asks you to power-cycle the device and checks that they are back (`nvs`), waiting for the password (`require_password`) or gone (`ram`).
 
 Run it through the flake, which brings the Python dependencies. Pass the device's `admin_token` with `--token`, or leave it out if none is configured, and its `key_storage` with `--storage` (default `ram`):
 

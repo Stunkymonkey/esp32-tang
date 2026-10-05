@@ -1,6 +1,6 @@
 # Implementation plan: ESPHome `tang_server` component
 
-Status: steps 1 to 3 are done; step 4 is next.
+Status: steps 1 to 4 are done; step 5 is next.
 
 This is the working plan for building the component described in [esphome-component.md](esphome-component.md). The design says *what* the component does. This file says *how to get there from today's `main/`*: the toolchain, what code carries over and what changes in it, and what each step has to show before the next one starts. It is deleted in step 8, together with `main/`.
 
@@ -92,7 +92,7 @@ The numbers match [Implementation order](esphome-component.md#implementation-ord
 
 **Done when:** the `nvs` checks pass, and `--check-reboot` brings the device back `active` with the same thumbprints.
 
-Done on an ESP32, with the reboot done as a reset through the serial adapter's EN line. Not checked on the device: a record that fails the boot checks, which leaves the device `unprovisioned` with `last_error` set.
+Done on an ESP32, with the reboot done as a reset through the serial adapter's EN line. In step 4, an encrypted record booted by the plain `nvs` firmware left the device `unprovisioned` with `last_error` set, and the record stayed: the `require_password` firmware then unlocked it.
 
 ### 4. `require_password`
 
@@ -101,6 +101,8 @@ Done on an ESP32, with the reboot done as a reset through the serial adapter's E
 - `example/tang-nvs-password.yaml`; `verify_tang.py --password`.
 
 **Done when:** the password checks pass, and the time of one `/activate` at the default 100000 iterations is measured. If it trips the task watchdog or takes much more than a few seconds, the default iterations come down and the design is updated with the measured number.
+
+Done on an ESP32. PBKDF2 has its own loop over mbedTLS's HMAC, because `mbedtls_pkcs5_pbkdf2_hmac_ext()` cannot yield; it yields every 1000 iterations and never tripped the watchdog. 100000 iterations took 10 s, so the default is now 20000 (2 s). The DRBG is now seeded in `setup()`: its first use was the deepest call on the httpd stack. The low point is now `/activate` from `locked` (decrypt, then the `d`/`x`/`y` check), with 728 bytes unused. Steps 5 to 7 add to the request path, so they watch this number; the fallback is still a crypto task.
 
 ### 5. Backoff, auto-deactivation, `/status`, flash encryption
 
@@ -137,6 +139,7 @@ Done on an ESP32, with the reboot done as a reset through the serial adapter's E
 | Risk | Where it shows | Fallback |
 |---|---|---|
 | P-521 crypto overflows the 4352-byte httpd stack | step 1, stack high-water mark | a dedicated crypto task with its own stack, fed by a queue |
-| PBKDF2 at 100000 iterations is too slow or trips the watchdog | step 4, timing | lower default; feed the watchdog between PBKDF2 rounds |
+| PBKDF2 at 100000 iterations is too slow or trips the watchdog | step 4, timing: 10 s, no watchdog | done: default 20000 (2 s); yields every 1000 iterations |
+| Long `/activate` holds the mutex for seconds | step 5, timers in `loop()` | `loop()` uses `try_lock()` and skips a round; a blocking lock would stall the main loop |
 | ESPHome expects a newer ESP-IDF than `esp-idf-full` provides (5.5.5 vs 5.5.2 today) | any compile after a bump | bump `nixpkgs-esp-dev`, or build in an FHS environment with ESPHome's own ESP-IDF |
 | ESPHome changes the web server API again | any update of `nixpkgs-unstable` | the flake pins it; re-check [Request handling](esphome-component.md#request-handling) before bumping |

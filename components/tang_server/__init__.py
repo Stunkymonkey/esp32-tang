@@ -18,6 +18,8 @@ CONF_AUTH_BACKOFF = "auth_backoff"
 CONF_MAX_FAILURES = "max_failures"
 CONF_LOCKOUT = "lockout"
 
+DEFAULT_PBKDF2_ITERATIONS = 20000
+
 TRIGGERS = [
     "on_activate",
     "on_deactivate",
@@ -41,8 +43,6 @@ KEY_STORAGES = {
 # Options that validate already but are built in later steps of
 # docs/esphome-implementation.md.
 NOT_IMPLEMENTED = [
-    CONF_REQUIRE_PASSWORD,
-    CONF_PBKDF2_ITERATIONS,
     CONF_MAX_ACTIVE_TIME,
     CONF_IDLE_TIMEOUT,
     CONF_AUTH_BACKOFF,
@@ -77,7 +77,7 @@ CONFIG_SCHEMA = cv.All(
             ),
             cv.Required(CONF_KEY_STORAGE): cv.one_of(*KEY_STORAGES, lower=True),
             cv.Optional(CONF_REQUIRE_PASSWORD): cv.boolean,
-            cv.Optional(CONF_PBKDF2_ITERATIONS): cv.int_range(min=1),
+            cv.Optional(CONF_PBKDF2_ITERATIONS): cv.int_range(min=1, max=10000000),
             cv.Optional(CONF_ADMIN_TOKEN): cv.All(cv.string_strict, cv.Length(min=1)),
             cv.Optional(CONF_MAX_ACTIVE_TIME): cv.positive_time_period_milliseconds,
             cv.Optional(CONF_IDLE_TIMEOUT): cv.positive_time_period_milliseconds,
@@ -103,6 +103,13 @@ async def to_code(config):
     await cg.register_component(var, config)
 
     cg.add(var.set_key_storage(KEY_STORAGES[config[CONF_KEY_STORAGE]]))
+    if config.get(CONF_REQUIRE_PASSWORD):
+        cg.add(var.set_require_password(True))
+        cg.add(
+            var.set_pbkdf2_iterations(
+                config.get(CONF_PBKDF2_ITERATIONS, DEFAULT_PBKDF2_ITERATIONS)
+            )
+        )
     if CONF_ADMIN_TOKEN in config:
         cg.add(var.set_admin_token(config[CONF_ADMIN_TOKEN]))
 

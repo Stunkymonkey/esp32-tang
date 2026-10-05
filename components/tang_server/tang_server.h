@@ -32,6 +32,8 @@ class TangServer : public Component {
   float get_setup_priority() const override;
 
   void set_key_storage(KeyStorage key_storage) { this->key_storage_ = key_storage; }
+  void set_require_password(bool require_password) { this->require_password_ = require_password; }
+  void set_pbkdf2_iterations(uint32_t iterations) { this->pbkdf2_iterations_ = iterations; }
   void set_admin_token(const char *admin_token) { this->admin_token_ = admin_token; }
 
   KeyStorage get_key_storage() const { return this->key_storage_; }
@@ -53,8 +55,9 @@ class TangServer : public Component {
   void load_at_boot_();
 
   // Callers hold the mutex.
-  /// Reads and checks the stored record into keys_.
-  bool load_stored_keys_(std::string &error);
+  /// Reads, decrypts if `password` is given, and checks the stored record
+  /// into keys_.
+  KeyStore::LoadResult load_stored_keys_(std::string &error, const std::string *password);
   /// Drops the keys from RAM.
   void clear_keys_();
   /// Short, safe message for the log and the last_error sensor; never key
@@ -66,6 +69,8 @@ class TangServer : public Component {
   web_server_base::WebServerBase *base_;
   HttpHandler handler_;
   KeyStorage key_storage_{KeyStorage::RAM};
+  bool require_password_{false};
+  uint32_t pbkdf2_iterations_{20000};
   const char *admin_token_{nullptr};
 
   Mutex lock_;

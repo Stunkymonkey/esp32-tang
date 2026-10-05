@@ -115,6 +115,7 @@ The record starts with a fixed magic number and a format version, followed by th
   - **Additional authenticated data:** bytes 0–36 (the header), so the version and parameters cannot be changed without failing the tag check.
   - **Wrong password:** the GCM tag check fails. The device cannot tell a wrong password from a corrupted record, and treats both as an authentication failure.
   - **When it runs:** encryption runs once, on the first `/activate`, which also generates the salt and nonce on the device. Decryption runs on every later `/activate`. Both use mbedTLS. The password is never stored.
+  - **Cost:** on an ESP32, one PBKDF2 iteration takes about 100 µs, so the default of 20000 iterations makes every `/activate` take about 2 s. 100000 took 10 s. The derivation yields every 1000 iterations, so the task watchdog does not trip at any count. The count is stored in the record, so changing `pbkdf2_iterations` only affects keys stored afterwards.
 
 Both payloads are the same JSON `/provision` accepts, so every path goes through one parser with one set of checks. These checks are:
 - valid JWK;
@@ -128,6 +129,8 @@ A later format version can add per-key flags, such as `advertise: false`, for ro
 - the magic number is wrong;
 - the format version is unknown;
 - the plaintext payload fails the checks above.
+
+The same applies to a record that does not match the configuration: a plaintext record on a device with `require_password`, or an encrypted one on a device without it.
 
 In that case the device boots `unprovisioned`, logs a warning and sets the `last_error` text sensor. The record stays in NVS until `/wipe` or the next store, so that a firmware downgrade does not destroy a record written by a newer version. An encrypted record can only be checked on `/activate`. If it is corrupt, `/activate` fails with 401, as for a wrong password.
 
@@ -169,7 +172,7 @@ tang_server:
   id: tang
   key_storage: nvs                # ram | nvs (required)
   require_password: true          # nvs only, default false; the password goes to /activate
-  pbkdf2_iterations: 100000       # with require_password only, default 100000
+  pbkdf2_iterations: 20000        # with require_password only, default 20000 (about 2 s per /activate)
   admin_token: !secret tang_admin_token   # optional; when set, protects all management endpoints
 
   # auto-deactivation, both optional and off by default
