@@ -110,6 +110,24 @@ Both payloads are the same JSON `/provision` accepts, so every path goes through
 
 A later format version can add per-key flags, such as `advertise: false`, for rotation.
 
+**Loading the record at boot.** The record also starts with a fixed magic number. The component ignores the record if:
+- it cannot be read;
+- the magic number is wrong;
+- the format version is unknown;
+- the plaintext payload fails the checks above.
+
+In that case the device boots `unprovisioned`, logs a warning and sets the `last_error` text sensor. The record stays in NVS until `/wipe` or the next store, so that a firmware downgrade does not destroy a record written by a newer version. An encrypted record can only be checked on `/activate`. If it is corrupt, `/activate` fails with 401, as for a wrong password.
+
+### Secrets in RAM
+
+Deactivate and wipe overwrite the private keys in RAM with `mbedtls_platform_zeroize` before freeing them. The same applies to:
+- the password from `/activate`, the action or the button, once the attempt has finished;
+- the derived AES key;
+- the decrypted `{"keys": [...]}` JSON, once it has been parsed;
+- the request body buffers of `/provision` and `/activate`.
+
+This keeps secrets in RAM only while they are needed. Someone who can read the RAM of an `active` device still gets the keys.
+
 ### Flash encryption
 
 Without ESP32 flash encryption, anyone holding the device can read NVS:
@@ -176,6 +194,8 @@ The token is compared in constant time. The token sits in the firmware, which is
 
 **`max_active_time` and `idle_timeout`** can be combined, and whichever expires first deactivates the server. The idle timer starts when the server becomes active and restarts on every successful `/rec`. In the plain `nvs` setup, a deactivated server stays `locked` until `/activate` or the next reboot, and the reboot activates it again.
 
+The timers run in the component's `loop()`, which also fires `on_deactivate` when one expires. They compare `millis()` values with unsigned subtraction (`millis() - since >= timeout`), so they keep working when the 32-bit counter wraps after about 49 days.
+
 **`auth_backoff`** counts failures across the whole device, not per client. Failures include a missing or wrong Bearer token, and a wrong key password on `/activate`. After each failure, the next attempt is refused for an exponentially growing time (1 s, 2 s, 4 s, …). After `max_failures` failures in a row, every protected endpoint answers 429 for `lockout`. A success resets the counter. Because the counter is global, an attacker can also lock out the legitimate admin. On a LAN device that is the better trade-off than allowing unlimited guessing. `on_auth_failure` makes such attempts visible. The PBKDF2 cost adds its own delay to each password guess.
 
 ## HTTP endpoints
@@ -194,6 +214,18 @@ All endpoints are at the root, so the Clevis URL is `http://<device>`. The paths
 
 `/reboot` is removed; ESPHome's `restart` button and action replace it.
 
+### Thumbprints
+
+Like tangd, `/adv/<thp>` and `/rec/<thp>` accept a key's RFC 7638 thumbprint in any hash tangd supports: S1, S224, S256, S384 and S512 (`TANG_THP_ALGS` in today's `helpers.h`). Clevis uses jose's default, S1. Only S1 would be enough for Clevis, but checking all of them keeps the device interchangeable with tangd. `/status` reports S1 and S256 for each key.
+
+### Request handling
+
+These notes come from an earlier ESPHome port (cherjr/esp32-tang, branch `fix/esphome-tang-runtime`) that ran into each of them:
+- **Bodies arrive in `handleBody()`.** On ESP-IDF, `web_server_base` has already read the request body from the socket before `handleRequest()` runs. It passes the body to `handleBody()` in chunks. Reading the socket again in `handleRequest()` gets nothing. The handler therefore collects the chunks per request and processes the complete body in `handleRequest()`. The ESP-IDF request type has no per-request scratch pointer, so the buffers are kept in a map keyed by the request pointer, and every path out of `handleRequest()` removes the entry. `isRequestHandlerTrivial()` returns `false`, otherwise `handleBody()` is never called.
+- **Body size limit.** A body larger than 4096 bytes is refused with 413 before it is buffered. Two P-521 keys with their private parts fit well below that limit. A chunk that arrives out of order or does not add up to `Content-Length` gives 400.
+- **Sending responses.** On ESP-IDF, the component sends responses with `httpd_resp_set_status`, `httpd_resp_set_type` and `httpd_resp_send`. `httpd_resp_set_status` needs the full status line, such as `"503 Service Unavailable"`, so the component keeps a table for every code it uses. `Retry-After` on 429 is set with `httpd_resp_set_hdr`.
+- **Only Tang paths.** `canHandle()` accepts only the component's own paths, so `web_server` keeps serving everything else.
+
 A `password` in the `/activate` body is required with `require_password` and rejected without it. A 400 for a mismatch makes a wrong setup obvious, instead of silently storing keys in a way the user did not expect.
 
 ### Deactivate and wipe
@@ -209,6 +241,7 @@ Both endpoints exist in every setup, so the same scripts work everywhere.
 | 200 | success |
 | 400 | malformed body; invalid JWK; `d` not matching `x`/`y`; missing signing or exchange key; `/activate` with `password` missing under `require_password` or present without it |
 | 401 | Bearer token missing or wrong, or wrong key password on `/activate` |
+| 413 | request body larger than 4096 bytes |
 | 404 | unknown path; `/activate` with `ram`; `/adv/<thp>` or `/rec/<thp>` for an unknown thumbprint |
 | 409 | `/provision` while not `unprovisioned` (wipe first); `/activate` while already `active`; `/activate` while `unprovisioned` |
 | 429 | auth backoff or lockout; `Retry-After` gives the seconds left |
@@ -234,8 +267,8 @@ With a valid token, or with no `admin_token` configured, it adds details. No pri
   "flash_encryption": false,
   "admin_token": true,
   "keys": [
-    {"thp": "…", "use": "sign", "crv": "P-521"},
-    {"thp": "…", "use": "exchange", "crv": "P-521"}
+    {"thp": {"S1": "…", "S256": "…"}, "use": "sign", "crv": "P-521"},
+    {"thp": {"S1": "…", "S256": "…"}, "use": "exchange", "crv": "P-521"}
   ],
   "active_since_s": 1234,
   "deactivates_in_s": 41966,
