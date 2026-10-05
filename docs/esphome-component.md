@@ -215,7 +215,17 @@ The token is compared in constant time. The token sits in the firmware, which is
 
 The timers run in the component's `loop()`, which also fires `on_deactivate` when one expires. They compare `millis()` values with unsigned subtraction (`millis() - since >= timeout`), so they keep working when the 32-bit counter wraps after about 49 days.
 
-**`auth_backoff`** counts failures across the whole device, not per client. Failures include a missing or wrong Bearer token, and a wrong key password on `/activate`. After each failure, the next attempt is refused for an exponentially growing time (1 s, 2 s, 4 s, …). After `max_failures` failures in a row, every protected endpoint answers 429 for `lockout`. A success resets the counter. Because the counter is global, an attacker can also lock out the legitimate admin. On a LAN device that is the better trade-off than allowing unlimited guessing. `on_auth_failure` makes such attempts visible. The PBKDF2 cost adds its own delay to each password guess.
+**`auth_backoff`** counts failures across the whole device, not per client, with one counter per secret:
+- **The token:** a missing or wrong Bearer token, when `admin_token` is set.
+- **The key password:** a wrong password on `/activate`.
+
+After each failure, the next attempt that checks the same secret is refused with 429 for an exponentially growing time (1 s, 2 s, 4 s, …), even if it carries the right secret. After `max_failures` failures in a row, the refusal lasts `lockout`. 429 carries `Retry-After` with the seconds left. A success resets that secret's counter.
+
+The counters are separate so that a success with one secret cannot reset the failures of the other. With one counter, someone who has the token could reset it with any valid request between password guesses, and never reach the lockout.
+
+Only requests that check a secret are refused: the management endpoints when `admin_token` is set, `/status` when it carries a token, and `/activate` with `require_password`. `/adv`, `/rec` and the public `/status` keep working. Refused requests do not count as failures, but they do count in the `auth_failure` counter and fire `on_auth_failure`.
+
+Because the counters are global, an attacker can also lock out the legitimate admin. On a LAN device that is the better trade-off than allowing unlimited guessing. `on_auth_failure` makes such attempts visible. The PBKDF2 cost adds its own delay to each password guess.
 
 ## HTTP endpoints
 
@@ -310,8 +320,10 @@ With a valid token, or with no `admin_token` configured, it adds details. No pri
 
 What `keys` lists depends on the state:
 - **`active` or `pending`:** the keys loaded in RAM.
-- **`locked` without a password:** the stored keys.
+- **`locked` without a password:** the stored keys, as they were when the keys were deactivated. `/status` does not read or check the record.
 - **`locked` with `require_password`:** empty, because the thumbprints are only known after decryption.
+
+`active_since_s` counts the seconds since the server became active. `deactivates_in_s` and `idle_deactivates_in_s` are the seconds left on each timer. All three are `null` while the server is not active, and the timers are `null` when they are not configured. `auth_failures` is the number of failures in a row, of both secrets together, and `lockout_remaining_s` is the longest wait left.
 
 A wrong token on `/status` counts as an auth failure and returns 401; it does not fall back to the public view. Leave the header out entirely for the public view.
 

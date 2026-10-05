@@ -1,5 +1,7 @@
 #include "http_handler.h"
 
+#include <cinttypes>
+#include <cstdio>
 #include <cstring>
 
 #include <esp_http_server.h>
@@ -205,17 +207,33 @@ void HttpHandler::handle_(AsyncWebServerRequest *request) {
   bool management = route == Route::PROVISION || route == Route::ACTIVATE || route == Route::DEACTIVATE ||
                     route == Route::WIPE;
   auto authorization = request->get_header("Authorization");
-  bool token_ok = this->server_->check_token(authorization);
+  // Which secrets this request checks: the token on every management
+  // endpoint, and on /status when one is sent; the key password on /activate.
+  bool checks_token =
+      this->server_->has_admin_token() && (management || (route == Route::STATUS && authorization.has_value()));
+  bool checks_password = route == Route::ACTIVATE && this->server_->get_require_password();
+  uint32_t blocked_ms = 0;
+  bool token_ok = true;
 
   if (route == Route::ACTIVATE && this->server_->get_key_storage() == KeyStorage::RAM) {
     // Nothing is stored with ram, so there is nothing to activate.
     result = Result::text(404, "Not found: /activate needs key_storage: nvs");
-  } else if ((management || (route == Route::STATUS && authorization.has_value())) && !token_ok) {
+  } else if ((checks_token || checks_password) &&
+             (blocked_ms = this->server_->auth_blocked_ms(checks_token, checks_password)) != 0) {
+    // Refused before any secret is looked at, so waiting is the only way on.
+    snprintf(this->retry_after_, sizeof(this->retry_after_), "%" PRIu32, (blocked_ms + 999) / 1000);
+    httpd_resp_set_hdr(*request, "Retry-After", this->retry_after_);
+    result = Result::text(429, "Too many failed attempts. Retry later.");
+    ESP_LOGW(TAG, "%s %s: refused by auth backoff for %s s", method_name(method), path, this->retry_after_);
+  } else if (checks_token && !(token_ok = this->server_->check_token(authorization))) {
     // A wrong token on /status is an error, not a fallback to the public view.
+    this->server_->auth_result(Secret::TOKEN, false);
     httpd_resp_set_hdr(*request, "WWW-Authenticate", "Bearer");
     result = Result::text(401, "Unauthorized");
     ESP_LOGW(TAG, "%s %s: missing or wrong token", method_name(method), path);
   } else {
+    if (checks_token)
+      this->server_->auth_result(Secret::TOKEN, true);
     switch (route) {
       case Route::ADV:
         result = this->server_->adv(thp);
@@ -236,7 +254,8 @@ void HttpHandler::handle_(AsyncWebServerRequest *request) {
         result = this->server_->wipe();
         break;
       case Route::STATUS:
-        result = this->server_->status(token_ok);
+        // Detailed with a valid token, or when no admin_token is set.
+        result = this->server_->status(!this->server_->has_admin_token() || (checks_token && token_ok));
         break;
       default:
         break;

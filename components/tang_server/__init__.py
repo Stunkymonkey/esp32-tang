@@ -42,12 +42,7 @@ KEY_STORAGES = {
 
 # Options that validate already but are built in later steps of
 # docs/esphome-implementation.md.
-NOT_IMPLEMENTED = [
-    CONF_MAX_ACTIVE_TIME,
-    CONF_IDLE_TIMEOUT,
-    CONF_AUTH_BACKOFF,
-    *TRIGGERS,
-]
+NOT_IMPLEMENTED = [*TRIGGERS]
 
 
 def _validate(config):
@@ -81,9 +76,11 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_ADMIN_TOKEN): cv.All(cv.string_strict, cv.Length(min=1)),
             cv.Optional(CONF_MAX_ACTIVE_TIME): cv.positive_time_period_milliseconds,
             cv.Optional(CONF_IDLE_TIMEOUT): cv.positive_time_period_milliseconds,
-            cv.Optional(CONF_AUTH_BACKOFF): cv.Schema(
+            cv.Optional(CONF_AUTH_BACKOFF, default={}): cv.Schema(
                 {
-                    cv.Optional(CONF_MAX_FAILURES, default=5): cv.int_range(min=1),
+                    cv.Optional(CONF_MAX_FAILURES, default=5): cv.int_range(
+                        min=1, max=255
+                    ),
                     cv.Optional(
                         CONF_LOCKOUT, default="5min"
                     ): cv.positive_time_period_milliseconds,
@@ -112,6 +109,12 @@ async def to_code(config):
         )
     if CONF_ADMIN_TOKEN in config:
         cg.add(var.set_admin_token(config[CONF_ADMIN_TOKEN]))
+    if CONF_MAX_ACTIVE_TIME in config:
+        cg.add(var.set_max_active_time(config[CONF_MAX_ACTIVE_TIME]))
+    if CONF_IDLE_TIMEOUT in config:
+        cg.add(var.set_idle_timeout(config[CONF_IDLE_TIMEOUT]))
+    backoff = config[CONF_AUTH_BACKOFF]
+    cg.add(var.set_auth_backoff(backoff[CONF_MAX_FAILURES], backoff[CONF_LOCKOUT]))
 
     # ES512 signatures for P-521 and the S384/S512 thumbprints. ESPHome turns
     # SHA-384/512 off on ESP-IDF 6 unless a component asks for them.

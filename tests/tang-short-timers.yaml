@@ -1,0 +1,42 @@
+# Test firmware for verify_tang.py --check-timers and --check-lockout:
+# require_password with short timers, a short lockout and cheap PBKDF2, so
+# the checks finish in minutes. Not for real use.
+#
+# Uses the examples' secrets: ln -s ../example/secrets.yaml tests/secrets.yaml
+esphome:
+  name: tang-test
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+external_components:
+  - source:
+      type: local
+      path: ../components
+
+logger:
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+tang_server:
+  key_storage: nvs
+  require_password: true
+  pbkdf2_iterations: 1000
+  admin_token: !secret tang_admin_token
+  max_active_time: 60s
+  idle_timeout: 20s
+  auth_backoff:
+    max_failures: 3
+    lockout: 30s

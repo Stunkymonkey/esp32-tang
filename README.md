@@ -78,6 +78,8 @@ Starts with `/wipe`, then runs the Tang endpoints against the device for both P-
 
 - With `--storage nvs`, it checks the `pending` and `locked` states: nothing is served before the first `/activate`, `/deactivate` keeps the stored keys and `/activate` brings the same ones back, and a password on `/activate` is refused.
 - With `--password`, for a `require_password` device, it also checks that `/activate` needs the password and that a wrong one gets 401 and leaves the device `locked`. `--password` implies `--storage nvs`.
+- With `--check-timers`, it checks `idle_timeout` and `max_active_time`, reading their values from `/status`. It takes as long as they are set to; `tests/tang-short-timers.yaml` sets them short.
+- With `--check-lockout` (needs `--token`), it checks the auth backoff: 1 s, 2 s, 4 s, … after each wrong token, then the lockout. Running it locks the device for its configured lockout time.
 - With `--check-reboot`, it provisions keys, asks you to power-cycle the device and checks that they are back (`nvs`), waiting for the password (`require_password`) or gone (`ram`).
 
 Run it through the flake, which brings the Python dependencies. Pass the device's `admin_token` with `--token`, or leave it out if none is configured, and its `key_storage` with `--storage` (default `ram`):

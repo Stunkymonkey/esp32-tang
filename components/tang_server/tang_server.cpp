@@ -1,9 +1,13 @@
 #include "tang_server.h"
 
+#include <algorithm>
 #include <cinttypes>
 #include <cstring>
 #include <strings.h>
 
+#include <esp_flash_encrypt.h>
+
+#include "esphome/core/hal.h"
 #include "esphome/core/log.h"
 
 namespace esphome::tang_server {
@@ -42,6 +46,27 @@ void TangServer::setup() {
   // Not add_handler(): web_server's auth would lock out Clevis, which cannot
   // log in. admin_token is the component's own protection.
   this->base_->add_handler_without_auth(&this->handler_);
+
+  // loop() only runs the auto-deactivation timers.
+  if (this->max_active_ms_ == 0 && this->idle_timeout_ms_ == 0)
+    this->disable_loop();
+}
+
+void TangServer::loop() {
+  // /activate holds the lock for seconds while PBKDF2 runs. Skip a round
+  // rather than stall the main loop; the timers are checked again soon.
+  if (!this->lock_.try_lock())
+    return;
+  if (this->state_ == State::ACTIVE) {
+    // Unsigned subtraction keeps working when millis() wraps after 49 days.
+    uint32_t now = millis();
+    if (this->max_active_ms_ != 0 && now - this->active_since_ms_ >= this->max_active_ms_) {
+      this->deactivate_("max_active_time");
+    } else if (this->idle_timeout_ms_ != 0 && now - this->last_recovery_ms_ >= this->idle_timeout_ms_) {
+      this->deactivate_("idle_timeout");
+    }
+  }
+  this->lock_.unlock();
 }
 
 void TangServer::dump_config() {
@@ -55,8 +80,26 @@ void TangServer::dump_config() {
                 YESNO(this->has_admin_token()), state_to_string(this->state_));
   if (this->require_password_)
     ESP_LOGCONFIG(TAG, "  PBKDF2 iterations: %" PRIu32, this->pbkdf2_iterations_);
+  if (this->max_active_ms_ != 0)
+    ESP_LOGCONFIG(TAG, "  Max active time: %" PRIu32 " s", this->max_active_ms_ / 1000);
+  if (this->idle_timeout_ms_ != 0)
+    ESP_LOGCONFIG(TAG, "  Idle timeout: %" PRIu32 " s", this->idle_timeout_ms_ / 1000);
+  ESP_LOGCONFIG(TAG,
+                "  Auth backoff: %u failures, then %" PRIu32 " s lockout\n"
+                "  Flash encryption: %s",
+                this->max_failures_, this->lockout_ms_ / 1000, YESNO(esp_flash_encryption_enabled()));
   if (!this->last_error_.empty())
     ESP_LOGCONFIG(TAG, "  Last error: %s", this->last_error_.c_str());
+
+  if (!this->has_admin_token())
+    ESP_LOGW(TAG, "No admin_token: anyone on the network can provision, deactivate and wipe");
+  if (this->stores_plaintext_without_flash_encryption_())
+    ESP_LOGW(TAG, "Keys are stored in plaintext and flash encryption is off: anyone holding the device can read "
+                  "them. See the flash encryption guide in the README.");
+}
+
+bool TangServer::stores_plaintext_without_flash_encryption_() const {
+  return this->key_storage_ == KeyStorage::NVS && !this->require_password_ && !esp_flash_encryption_enabled();
 }
 
 void TangServer::load_at_boot_() {
@@ -156,14 +199,23 @@ Result TangServer::adv(const std::string &thp) {
   LockGuard guard(this->lock_);
   if (this->state_ != State::ACTIVE)
     return this->inactive_result_();
-  return build_adv(this->keys_, thp);
+  Result result = build_adv(this->keys_, thp);
+  if (result.status == 200)
+    this->adv_count_++;
+  return result;
 }
 
 Result TangServer::rec(const std::string &thp, const std::vector<uint8_t> &body) {
   LockGuard guard(this->lock_);
   if (this->state_ != State::ACTIVE)
     return this->inactive_result_();
-  return exchange(this->keys_, thp, reinterpret_cast<const char *>(body.data()), body.size());
+  Result result = exchange(this->keys_, thp, reinterpret_cast<const char *>(body.data()), body.size());
+  if (result.status == 200) {
+    this->recovery_count_++;
+    // Only a successful recovery restarts the idle timer.
+    this->last_recovery_ms_ = millis();
+  }
+  return result;
 }
 
 Result TangServer::provision(const std::vector<uint8_t> &body) {
@@ -238,6 +290,8 @@ Result TangServer::activate(const std::vector<uint8_t> &body) {
         this->set_last_error_(error);
         return {500, "text/plain", error};
       }
+      if (this->stores_plaintext_without_flash_encryption_())
+        ESP_LOGW(TAG, "Keys stored in plaintext while flash encryption is off");
       ESP_LOGI(TAG, "Activated: keys stored");
       this->set_state_(State::ACTIVE);
       return Result::text(200, "Keys stored and active.");
@@ -245,10 +299,12 @@ Result TangServer::activate(const std::vector<uint8_t> &body) {
     case State::LOCKED:
       switch (this->load_stored_keys_(error, key_password)) {
         case KeyStore::LoadResult::OK:
+          this->auth_result(Secret::PASSWORD, true);
           break;
         case KeyStore::LoadResult::WRONG_PASSWORD:
           // A corrupt record looks the same; the tag check cannot tell.
           ESP_LOGW(TAG, "/activate: wrong password");
+          this->auth_result(Secret::PASSWORD, false);
           return Result::text(401, "Wrong password");
         default:
           this->set_last_error_("Cannot activate: " + error);
@@ -263,20 +319,29 @@ Result TangServer::activate(const std::vector<uint8_t> &body) {
 
 Result TangServer::deactivate() {
   LockGuard guard(this->lock_);
-  this->clear_keys_();
+  this->deactivate_("manual");
+  return Result::text(200, "Deactivated.");
+}
+
+void TangServer::deactivate_(const char *reason) {
+  if (this->state_ != State::ACTIVE && this->state_ != State::PENDING)
+    return;  // no keys in RAM
+  ESP_LOGI(TAG, "Deactivating (%s)", reason);
   // Stored keys stay and can be activated again. Keys that were never
   // stored (ram, or pending) are gone.
-  if (this->state_ == State::ACTIVE && this->key_storage_ == KeyStorage::NVS) {
-    this->set_state_(State::LOCKED);
-  } else if (this->state_ != State::LOCKED) {
-    this->set_state_(State::UNPROVISIONED);
-  }
-  return Result::text(200, "Deactivated.");
+  bool stored = this->state_ == State::ACTIVE && this->key_storage_ == KeyStorage::NVS;
+  if (stored && !this->require_password_)
+    this->stored_info_ = this->key_info_();
+  this->clear_keys_();
+  this->set_state_(stored ? State::LOCKED : State::UNPROVISIONED);
 }
 
 Result TangServer::wipe() {
   LockGuard guard(this->lock_);
+  if (this->state_ != State::UNPROVISIONED)
+    ESP_LOGI(TAG, "Wiping");
   this->clear_keys_();
+  this->stored_info_.clear();
   if (this->key_storage_ == KeyStorage::NVS) {
     std::string error;
     if (!this->store_.erase(error)) {
@@ -289,13 +354,120 @@ Result TangServer::wipe() {
   return Result::text(200, "Wiped.");
 }
 
-Result TangServer::status(bool /*detailed*/) {
+Result TangServer::status(bool detailed) {
   LockGuard guard(this->lock_);
-  // The detailed view comes with the rest of /status.
-  std::string body = R"({"state":")";
-  body += state_to_string(this->state_);
-  body += R"("})";
-  return {200, "application/json", body};
+  JsonDocument doc;
+  doc["state"] = state_to_string(this->state_);
+  if (detailed) {
+    // Public facts only: no private key material, whatever the state.
+    doc["key_storage"] = this->key_storage_ == KeyStorage::RAM ? "ram" : "nvs";
+    doc["require_password"] = this->require_password_;
+    doc["flash_encryption"] = esp_flash_encryption_enabled();
+    doc["admin_token"] = this->has_admin_token();
+
+    // Keys in RAM while active or pending, the stored ones while locked
+    // without a password. With a password, the thumbprints are only known
+    // after decryption.
+    const bool in_ram = this->state_ == State::ACTIVE || this->state_ == State::PENDING;
+    JsonArray keys = doc["keys"].to<JsonArray>();
+    for (const auto &info : in_ram ? this->key_info_() : this->stored_info_) {
+      JsonObject k = keys.add<JsonObject>();
+      k["thp"]["S1"] = info.thp_s1;
+      k["thp"]["S256"] = info.thp_s256;
+      k["use"] = info.usage == KeyUsage::SIGN ? "sign" : "exchange";
+      k["crv"] = info.crv;
+    }
+
+    uint32_t now = millis();
+    if (this->state_ == State::ACTIVE) {
+      uint32_t active = now - this->active_since_ms_;
+      uint32_t idle = now - this->last_recovery_ms_;
+      doc["active_since_s"] = active / 1000;
+      if (this->max_active_ms_ != 0) {
+        doc["deactivates_in_s"] = (this->max_active_ms_ - std::min(active, this->max_active_ms_)) / 1000;
+      } else {
+        doc["deactivates_in_s"] = nullptr;
+      }
+      if (this->idle_timeout_ms_ != 0) {
+        doc["idle_deactivates_in_s"] = (this->idle_timeout_ms_ - std::min(idle, this->idle_timeout_ms_)) / 1000;
+      } else {
+        doc["idle_deactivates_in_s"] = nullptr;
+      }
+    } else {
+      doc["active_since_s"] = nullptr;
+      doc["deactivates_in_s"] = nullptr;
+      doc["idle_deactivates_in_s"] = nullptr;
+    }
+
+    uint32_t auth_failure_count;
+    {
+      LockGuard auth_guard(this->auth_lock_);
+      doc["auth_failures"] = this->token_backoff_.failures + this->password_backoff_.failures;
+      uint32_t blocked =
+          std::max(this->blocked_ms_(this->token_backoff_, now), this->blocked_ms_(this->password_backoff_, now));
+      doc["lockout_remaining_s"] = (blocked + 999) / 1000;
+      auth_failure_count = this->auth_failure_count_;
+    }
+
+    JsonObject counters = doc["counters"].to<JsonObject>();
+    counters["activation"] = this->activation_count_;
+    counters["recovery"] = this->recovery_count_;
+    counters["adv"] = this->adv_count_;
+    counters["auth_failure"] = auth_failure_count;
+  }
+
+  Result result{200, "application/json", {}};
+  serializeJson(doc, result.body);
+  return result;
+}
+
+std::vector<KeyInfo> TangServer::key_info_() const {
+  std::vector<KeyInfo> info;
+  info.reserve(this->keys_.size());
+  for (const auto &key : this->keys_)
+    info.push_back({key.thp_by_alg("S1"), key.thp_by_alg("S256"), key.usage, key.crv()});
+  return info;
+}
+
+uint32_t TangServer::blocked_ms_(const Backoff &backoff, uint32_t now) const {
+  if (backoff.failures == 0)
+    return 0;
+  // 1 s, 2 s, 4 s, ... after each failure, then the lockout once
+  // max_failures failures in a row are reached.
+  uint32_t wait = this->lockout_ms_;
+  if (backoff.failures < this->max_failures_)
+    wait = std::min<uint32_t>(this->lockout_ms_, uint32_t{1000} << std::min(backoff.failures - 1, 20));
+  uint32_t elapsed = now - backoff.last_failure_ms;
+  return elapsed >= wait ? 0 : wait - elapsed;
+}
+
+uint32_t TangServer::auth_blocked_ms(bool token, bool password) {
+  LockGuard guard(this->auth_lock_);
+  uint32_t now = millis();
+  uint32_t blocked = 0;
+  if (token)
+    blocked = std::max(blocked, this->blocked_ms_(this->token_backoff_, now));
+  if (password)
+    blocked = std::max(blocked, this->blocked_ms_(this->password_backoff_, now));
+  if (blocked != 0)
+    this->auth_failure_count_++;
+  return blocked;
+}
+
+void TangServer::auth_result(Secret secret, bool ok) {
+  LockGuard guard(this->auth_lock_);
+  Backoff &backoff = secret == Secret::TOKEN ? this->token_backoff_ : this->password_backoff_;
+  if (ok) {
+    backoff.failures = 0;
+    return;
+  }
+  if (backoff.failures < UINT8_MAX)
+    backoff.failures++;
+  backoff.last_failure_ms = millis();
+  this->auth_failure_count_++;
+  uint32_t wait = this->blocked_ms_(backoff, backoff.last_failure_ms);
+  ESP_LOGW(TAG, "Wrong %s (%u in a row): next attempt in %" PRIu32 " s",
+           secret == Secret::TOKEN ? "token" : "password", backoff.failures, (wait + 999) / 1000);
 }
 
 void TangServer::clear_keys_() {
@@ -316,6 +488,13 @@ void TangServer::set_state_(State state) {
     return;
   ESP_LOGI(TAG, "State: %s -> %s", state_to_string(this->state_), state_to_string(state));
   this->state_ = state;
+  if (state == State::ACTIVE) {
+    // Every way of becoming active counts as one activation and starts
+    // both timers.
+    this->activation_count_++;
+    this->active_since_ms_ = millis();
+    this->last_recovery_ms_ = this->active_since_ms_;
+  }
 }
 
 }  // namespace esphome::tang_server

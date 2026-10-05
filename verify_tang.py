@@ -21,11 +21,13 @@ TOKEN = None  # admin_token, sent as a Bearer token when set
 STORAGE = "ram"  # the device's key_storage
 PASSWORD = None  # the key password of a require_password device
 CHECK_REBOOT = False
+CHECK_LOCKOUT = False
+CHECK_TIMERS = False
 TIMEOUT = 10
 
 
 def parse_args():
-    global ESP_IP, TOKEN, STORAGE, PASSWORD, CHECK_REBOOT
+    global ESP_IP, TOKEN, STORAGE, PASSWORD, CHECK_REBOOT, CHECK_LOCKOUT, CHECK_TIMERS
     parser = argparse.ArgumentParser(description='Verify ESP32 Tang Server')
     parser.add_argument('url', help='Base URL of the ESP32 Tang server (e.g., http://192.168.4.1)')
     parser.add_argument('--token', help="the device's admin_token; leave out if none is configured")
@@ -36,7 +38,16 @@ def parse_args():
                              'The first /activate of each run sets it.')
     parser.add_argument('--check-reboot', action='store_true',
                         help='ask for a power cycle and check which keys survive it')
+    parser.add_argument('--check-lockout', action='store_true',
+                        help='check the auth backoff and lockout; needs --token, and locks the device '
+                             'for its configured lockout time')
+    parser.add_argument('--check-timers', action='store_true',
+                        help='check max_active_time and idle_timeout; takes as long as they are set to')
     args = parser.parse_args()
+    if args.check_lockout and args.token is None:
+        parser.error('--check-lockout needs --token')
+    CHECK_LOCKOUT = args.check_lockout
+    CHECK_TIMERS = args.check_timers
     PASSWORD = args.password
     if PASSWORD is not None and args.storage == 'ram':
         parser.error('--password needs --storage nvs')
@@ -54,8 +65,8 @@ def fail(message):
     sys.exit(1)
 
 
-def request(method, path, expected, json_body=None, token=True, timeout=TIMEOUT):
-    """Sends a request and fails unless it returns `expected`.
+def send(method, path, json_body=None, token=True, timeout=TIMEOUT):
+    """Sends a request and returns the response, whatever its status.
 
     Bodies always go through `json=`, so they carry Content-Type and
     Content-Length; a POST without a body still sends Content-Length: 0.
@@ -67,9 +78,14 @@ def request(method, path, expected, json_body=None, token=True, timeout=TIMEOUT)
     if token is not None:
         headers["Authorization"] = f"Bearer {token}"
     try:
-        r = requests.request(method, f"{ESP_IP}{path}", json=json_body, headers=headers, timeout=timeout)
+        return requests.request(method, f"{ESP_IP}{path}", json=json_body, headers=headers, timeout=timeout)
     except Exception as e:
         fail(f"{method} {path}: {e}")
+
+
+def request(method, path, expected, json_body=None, token=True, timeout=TIMEOUT):
+    """Sends a request and fails unless it returns `expected`."""
+    r = send(method, path, json_body, token, timeout)
     if r.status_code != expected:
         fail(f"{method} {path} returned {r.status_code}, expected {expected}: {r.text}")
     return r
@@ -150,6 +166,61 @@ def get_status(token=True):
     return status
 
 
+def wait_out_backoff(method="GET", path="/status", json_body=None):
+    """After a failed secret, the device refuses the next attempt for a
+    while (auth_backoff). Waits until a request that checks the same secret
+    is no longer refused. The default, /status with the token, also resets
+    the token's failure count; without admin_token it is never refused."""
+    while True:
+        r = send(method, path, json_body)
+        if r.status_code != 429:
+            return r
+        wait = int(r.headers.get("Retry-After", "1"))
+        print(f"Auth backoff: waiting {wait} s")
+        time.sleep(wait)
+
+
+def wait_out_password_backoff():
+    """/activate without a password checks the password backoff but no
+    password, so it never counts as a failure."""
+    wait_out_backoff("POST", "/activate")
+
+
+def thumbprints(*keys):
+    """What /status lists for the given keys."""
+    return sorted((jwk_thumbprint(k, "sha1"), jwk_thumbprint(k), "sign" if "sign" in k["key_ops"] else "exchange",
+                   k["crv"]) for k in keys)
+
+
+def check_detailed_status(state, keys):
+    """The detailed /status: the configuration, the keys it lists (none, or
+    the given ones) and the timers and counters."""
+    status = get_status()
+    for field in ["state", "key_storage", "require_password", "flash_encryption", "admin_token", "keys",
+                  "active_since_s", "deactivates_in_s", "idle_deactivates_in_s", "auth_failures",
+                  "lockout_remaining_s", "counters"]:
+        if field not in status:
+            fail(f"detailed /status has no {field}: {status}")
+    expected = {
+        "state": state,
+        "key_storage": STORAGE,
+        "require_password": PASSWORD is not None,
+        "admin_token": TOKEN is not None,
+    }
+    for field, value in expected.items():
+        if status[field] != value:
+            fail(f"/status {field} is {status[field]!r}, expected {value!r}")
+    listed = sorted((k["thp"]["S1"], k["thp"]["S256"], k["use"], k["crv"]) for k in status["keys"])
+    if listed != thumbprints(*keys):
+        fail(f"/status lists keys {listed}, expected {thumbprints(*keys)}")
+    if (status["active_since_s"] is None) != (state != "active"):
+        fail(f"/status active_since_s is {status['active_since_s']} while {state}")
+    if set(status["counters"]) != {"activation", "recovery", "adv", "auth_failure"}:
+        fail(f"/status counters: {status['counters']}")
+    print(f"Detailed status OK: {state}, {len(keys)} keys, flash_encryption={status['flash_encryption']}")
+    return status
+
+
 def check_state(expected):
     state = get_status().get("state")
     if state != expected:
@@ -169,6 +240,7 @@ def check_public_status():
         if set(public) != {"state"}:
             fail(f"public /status shows more than the state: {public}")
         request("GET", "/status", 401, token="wrong-" + TOKEN)
+        wait_out_backoff()
         print("OK: public view shows only the state, a wrong token gets 401")
     else:
         if public != get_status():
@@ -184,7 +256,9 @@ def check_auth():
     for path in ["/provision", "/deactivate", "/wipe"]:
         body = {"keys": []} if path == "/provision" else None
         request("POST", path, 401, json_body=body, token=None)
+        wait_out_backoff()
         request("POST", path, 401, json_body=body, token=wrong)
+        wait_out_backoff()
         print(f"OK: {path} -> 401 without and with a wrong token")
 
 
@@ -242,7 +316,7 @@ def provision(sign_key, exch_key):
     print(f"\n[1] Provisioning keys to {ESP_IP}...")
     r = request("POST", "/provision", 200, json_body=provision_payload(sign_key, exch_key))
     print(f"Response: {r.text}")
-    check_state("active" if STORAGE == "ram" else "pending")
+    check_detailed_status("active" if STORAGE == "ram" else "pending", [sign_key, exch_key])
 
 
 def verify_second_provision_refused(sign_key, exch_key):
@@ -422,18 +496,21 @@ def run_test_suite(curve_name):
         provision_and_activate_nvs(sign_key, exch_key)
     verify_second_provision_refused(sign_key, exch_key)
     verify_serving(sign_key, exch_key)
-    get_status()  # the detailed view while keys are loaded, checked for "d"
+    check_detailed_status("active", [sign_key, exch_key])
 
     if STORAGE == "nvs":
         # The stored keys stay and come back on /activate.
         deactivate("locked")
         check_inactive(sign_key, exch_key)
+        # Listed while locked, unless they are encrypted.
+        check_detailed_status("locked", [] if PASSWORD is not None else [sign_key, exch_key])
         verify_second_provision_refused(sign_key, exch_key)
         if PASSWORD is not None:
             print("\n[locked] Activating with a wrong password (expect 401)...")
             activate_request(401, "wrong-" + PASSWORD)
             check_state("locked")
             check_inactive(sign_key, exch_key)
+            wait_out_password_backoff()
         activate()
         verify_serving(sign_key, exch_key)
 
@@ -442,6 +519,7 @@ def run_test_suite(curve_name):
     check_inactive(sign_key, exch_key)
     wipe()
     check_inactive(sign_key, exch_key)
+    check_detailed_status("unprovisioned", [])
     if STORAGE == "nvs":
         print("\n[wipe] Nothing left to activate (expect 409)...")
         request("POST", "/activate", 409)
@@ -459,15 +537,143 @@ def wait_for_device(timeout=180):
     fail(f"device did not come back within {timeout} s")
 
 
+def provision_and_activate(sign_key, exch_key):
+    provision(sign_key, exch_key)
+    if STORAGE == "nvs":
+        activate()
+
+
+def wait_for_state_change(timeout, keep_busy=None):
+    """Polls until the device leaves `active` and returns the seconds it
+    took. `keep_busy` runs between polls."""
+    start = time.monotonic()
+    while time.monotonic() - start < timeout:
+        if get_status().get("state") != "active":
+            return time.monotonic() - start
+        if keep_busy is not None:
+            keep_busy()
+        time.sleep(0.5)
+    fail(f"still active after {timeout:.0f} s")
+
+
+def check_timers():
+    """max_active_time and idle_timeout, read from /status. Only a successful
+    /rec restarts the idle timer; /adv does not."""
+    print(f"\n{'='*20} Timers {'='*20}")
+    sign_key = generate_key(["sign", "verify"], "P-256")
+    exch_key = generate_key(["deriveKey"], "P-256")
+    after = "locked" if STORAGE == "nvs" else "unprovisioned"
+
+    provision_and_activate(sign_key, exch_key)
+    status = get_status()
+    idle, max_active = status["idle_deactivates_in_s"], status["deactivates_in_s"]
+    if idle is None and max_active is None:
+        fail("no timer configured: set max_active_time or idle_timeout")
+    print(f"idle_deactivates_in_s={idle}, deactivates_in_s={max_active}")
+
+    if idle is not None:
+        print(f"\n[timers] A /rec halfway restarts the idle timer...")
+        time.sleep(idle / 2)
+        perform_exchange(exch_key)
+        left = get_status()["idle_deactivates_in_s"]
+        if left < idle - 1:
+            fail(f"/rec did not restart the idle timer: {left} s left of {idle}")
+        print(f"\n[timers] /adv alone does not keep it active ({idle} s)...")
+        took = wait_for_state_change(idle + 10, lambda: request("GET", "/adv", 200))
+        if abs(took - idle) > 2:
+            fail(f"idle_timeout fired after {took:.1f} s, expected {idle} s")
+        check_state(after)
+        check_inactive(sign_key, exch_key)
+        print(f"OK: idle_timeout after {took:.1f} s")
+        if max_active is not None:
+            if STORAGE == "nvs":
+                activate()
+            else:
+                provision(sign_key, exch_key)
+
+    if max_active is not None:
+        max_active = get_status()["deactivates_in_s"]
+        print(f"\n[timers] Recoveries do not extend max_active_time ({max_active} s)...")
+        last = [0.0]
+
+        def keep_recovering():
+            # Often enough to keep the idle timer from firing first.
+            if time.monotonic() - last[0] >= (min(idle / 3, 5) if idle else 5):
+                perform_exchange(exch_key)
+                last[0] = time.monotonic()
+
+        took = wait_for_state_change(max_active + 10, keep_recovering)
+        if abs(took - max_active) > 2:
+            fail(f"max_active_time fired after {took:.1f} s, expected {max_active} s")
+        check_state(after)
+        print(f"OK: max_active_time after {took:.1f} s")
+
+    wipe()
+    print(f"{'='*20} Timers Complete {'='*20}\n")
+
+
+def check_lockout():
+    """Each failure delays the next attempt: 1 s, 2 s, 4 s, ... After
+    max_failures in a row, the lockout. The token and the key password are
+    counted separately."""
+    print(f"\n{'='*20} Lockout {'='*20}")
+    wrong = "wrong-" + TOKEN
+    failures = 0
+    while True:
+        request("GET", "/status", 401, token=wrong)
+        failures += 1
+        # Even the right token is refused until the wait is over.
+        r = request("GET", "/status", 429)
+        retry = int(r.headers["Retry-After"])
+        backoff = 2 ** (failures - 1)
+        print(f"Failure {failures}: Retry-After {retry} s")
+        if retry not in (backoff, backoff - 1) or failures >= 20:
+            break
+        time.sleep(retry)
+    if failures < 2:
+        fail(f"locked out after {failures} failure, expected a backoff first")
+    print(f"Locked out after {failures} failures for {retry} s")
+
+    print("\n[lockout] Protected endpoints answer 429, the rest still works...")
+    for method, path in [("POST", "/wipe"), ("POST", "/deactivate"), ("POST", "/provision")]:
+        r = request(method, path, 429, json_body={"keys": []} if path == "/provision" else None)
+        if "Retry-After" not in r.headers:
+            fail(f"{path} 429 without Retry-After")
+    public = get_status(token=None)
+    if set(public) != {"state"}:
+        fail(f"public /status during lockout: {public}")
+    if send("GET", "/adv").status_code == 429:
+        fail("/adv is refused during the lockout")
+
+    print(f"\n[lockout] Waiting {retry} s for the lockout to end...")
+    time.sleep(retry + 1)
+    status = get_status()
+    if status["auth_failures"] != 0 or status["lockout_remaining_s"] != 0:
+        fail(f"a valid token did not reset the backoff: {status}")
+    print("OK: a valid token after the lockout resets the count")
+
+    if PASSWORD is not None:
+        print("\n[lockout] A wrong password delays the next /activate, but not the token...")
+        sign_key = generate_key(["sign", "verify"], "P-256")
+        exch_key = generate_key(["deriveKey"], "P-256")
+        provision_and_activate(sign_key, exch_key)
+        deactivate("locked")
+        activate_request(401, "wrong-" + PASSWORD)
+        r = activate_request(429, PASSWORD)
+        get_status()  # the token is still accepted
+        time.sleep(int(r.headers["Retry-After"]))
+        activate()
+        wipe()
+    print(f"{'='*20} Lockout Complete {'='*20}\n")
+
+
 def check_reboot():
     """With nvs, the device activates its stored keys at boot, or waits for
     the password with require_password. With ram, they are gone."""
     print(f"\n{'='*20} Reboot {'='*20}")
     sign_key = generate_key(["sign", "verify"], "P-256")
     exch_key = generate_key(["deriveKey"], "P-256")
-    provision(sign_key, exch_key)
-    if STORAGE == "nvs":
-        activate()
+    provision_and_activate(sign_key, exch_key)
 
     input("\nPower-cycle the device, then press Enter... ")
     wait_for_device()
@@ -493,7 +699,8 @@ if __name__ == "__main__":
     print(f"Targeting: {ESP_IP} (key_storage: {STORAGE}, {'with' if PASSWORD else 'without'} password, "
           f"{'with' if TOKEN else 'without'} admin token)")
 
-    # Ensure fresh state
+    # Ensure fresh state, after any lockout left by an earlier run
+    wait_out_backoff()
     wipe()
     check_inactive()
     check_public_status()
@@ -502,6 +709,10 @@ if __name__ == "__main__":
 
     run_test_suite("P-256")
     run_test_suite("P-521")
+    if CHECK_TIMERS:
+        check_timers()
+    if CHECK_LOCKOUT:
+        check_lockout()
     if CHECK_REBOOT:
         check_reboot()
 

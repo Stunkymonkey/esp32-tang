@@ -1,6 +1,6 @@
 # Implementation plan: ESPHome `tang_server` component
 
-Status: steps 1 to 4 are done; step 5 is next.
+Status: steps 1 to 5 are done; step 6 is next.
 
 This is the working plan for building the component described in [esphome-component.md](esphome-component.md). The design says *what* the component does. This file says *how to get there from today's `main/`*: the toolchain, what code carries over and what changes in it, and what each step has to show before the next one starts. Where the work differs from the plan, [Deviations from the plan](#deviations-from-the-plan) records how and why; step 8 moves that section into the design. This file is deleted in step 8, together with `main/`.
 
@@ -113,6 +113,8 @@ Done on an ESP32. PBKDF2 has its own loop over mbedTLS's HMAC, because `mbedtls_
 
 **Done when:** `verify_tang.py --check-lockout` passes, and the timers are checked with short values in a test YAML.
 
+Done on an ESP32 with `tests/tang-short-timers.yaml` (`require_password`, `idle_timeout: 20s`, `max_active_time: 60s`, 3 failures, 30 s lockout). `--check-timers` measured 20.5 s and 60.4 s; `--check-lockout` saw Retry-After 1 s, 2 s and then 30 s. The `nvs`, `ram` and no-token setups pass their checks too, and their boot warnings show. The httpd stack low point is now 712 bytes unused, on `/activate` from `locked`.
+
 ### 6. Triggers, actions, conditions
 
 - `automation.h` and the codegen in `__init__.py` for every trigger, action and condition in [Automations](esphome-component.md#automations).
@@ -185,12 +187,24 @@ Where the work differs from this plan or from the design as it stood before the 
 - **The DRBG is seeded in `setup()`.** Its first use, gathering entropy, was the deepest call on the httpd stack.
 - **`verify_tang.py --password` implies `--storage nvs`.**
 
+### Step 5
+
+- **One backoff counter per secret**, the token and the key password, instead of one for the whole device. With one counter, someone holding the token could reset it with any valid request between password guesses. Design updated.
+- **Backoff applies only to requests that check a secret.** The design said "every protected endpoint". Without `admin_token`, the management endpoints check nothing, so they are not refused; the public `/status`, `/adv` and `/rec` never are. Design updated.
+- **Refusals are not failures**, so waiting is always enough to get through. They still count in the `auth_failure` counter, and in step 6 they fire `on_auth_failure`, as the design says.
+- **`/status` reports the timers as `null`** while the server is not active or a timer is not configured. The design did not say. Design updated.
+- **While `locked` without a password, `/status` lists the stored keys as they were when deactivated.** Reading and checking the record on every `/status` would run the key-pair check on the httpd stack. Design updated.
+- **`loop()` uses `try_lock()`** and skips a round while `/activate` holds the lock, as planned in the risk table. Without timers, `loop()` is disabled.
+- **The warnings are in `dump_config()`**, so they show at boot and whenever a log client connects. The plaintext warning also shows when keys are stored.
+- **The test YAML is `tests/tang-short-timers.yaml`.** It reads the examples' secrets through a `tests/secrets.yaml` symlink, which is git-ignored.
+- **`verify_tang.py` waits out the backoff** after each failure it causes on purpose, and before it starts, so a lockout left by an earlier run does not fail the next one.
+
 ## Risks to check early
 
 | Risk | Where it shows | Fallback |
 |---|---|---|
 | P-521 crypto overflows the 4352-byte httpd stack | step 1, stack high-water mark | a dedicated crypto task with its own stack, fed by a queue |
 | PBKDF2 at 100000 iterations is too slow or trips the watchdog | step 4, timing: 10 s, no watchdog | done: default 20000 (2 s); yields every 1000 iterations |
-| Long `/activate` holds the mutex for seconds | step 5, timers in `loop()` | `loop()` uses `try_lock()` and skips a round; a blocking lock would stall the main loop |
+| Long `/activate` holds the mutex for seconds | step 5, timers in `loop()` | done: `loop()` uses `try_lock()` and skips a round |
 | ESPHome expects a newer ESP-IDF than `esp-idf-full` provides (5.5.5 vs 5.5.2 today) | any compile after a bump | bump `nixpkgs-esp-dev`, or build in an FHS environment with ESPHome's own ESP-IDF |
 | ESPHome changes the web server API again | any update of `nixpkgs-unstable` | the flake pins it; re-check [Request handling](esphome-component.md#request-handling) before bumping |

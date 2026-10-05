@@ -47,6 +47,8 @@ class HttpHandler : public AsyncWebHandler {
   bool body_out_of_order_{false};
 
   uint32_t stack_high_water_{UINT32_MAX};
+  // Retry-After of the response being sent; httpd keeps the pointer.
+  char retry_after_[12]{};
 };
 
 }  // namespace esphome::tang_server

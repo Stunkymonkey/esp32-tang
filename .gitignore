@@ -60,3 +60,4 @@ managed_components/
 # ESPHome
 .esphome/
 example/secrets.yaml
+tests/secrets.yaml
