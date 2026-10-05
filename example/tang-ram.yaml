@@ -1,0 +1,32 @@
+# Tang server that keeps its keys in RAM only. A stolen device holds
+# nothing, but every power loss needs a new /provision.
+esphome:
+  name: tang
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+external_components:
+  - source:
+      type: local
+      path: ../components
+
+logger:
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+tang_server:
+  key_storage: ram
+  admin_token: !secret tang_admin_token

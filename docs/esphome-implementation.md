@@ -1,14 +1,15 @@
 # Implementation plan: ESPHome `tang_server` component
 
-Status: ready to start with step 1.
+Status: step 1 is done; step 2 is next.
 
 This is the working plan for building the component described in [esphome-component.md](esphome-component.md). The design says *what* the component does. This file says *how to get there from today's `main/`*: the toolchain, what code carries over and what changes in it, and what each step has to show before the next one starts. It is deleted in step 8, together with `main/`.
 
 ## Toolchain
 
-- **ESPHome 2026.8.0**, from the flake input `nixpkgs-unstable`, is in the default dev shell. It builds with ESP-IDF 5.5.5, mbedTLS 3.6 and ArduinoJson 7.4.3.
-- **The ESP-IDF build stays until step 8.** `main/` is the working reference: when the new firmware misbehaves, the old one can be flashed and run through `verify_tang.py` to compare. `esp-idf-full` no longer evaluates on a current nixpkgs, which is why ESPHome comes from a second nixpkgs input. Step 8 drops `nixpkgs-esp-dev`, points `nixpkgs` at a current revision and removes `nixpkgs-unstable`.
-- **Building:** `esphome compile example/tang-ram.yaml`, and `esphome run example/tang-ram.yaml --device /dev/ttyUSB0` to flash and follow the log. The first compile downloads ESP-IDF and its toolchain through PlatformIO into `~/.platformio`. This part is not pinned by the flake.
+- **ESPHome 2026.8.0**, from the flake input `nixpkgs-unstable`, is in the default dev shell. It brings mbedTLS 3.6 and ArduinoJson 7.4.3.
+- **ESPHome builds with `esp-idf-full` from `nixpkgs-esp-dev` (ESP-IDF 5.5.2).** ESPHome 2026.8 calls `idf.py` directly rather than going through PlatformIO. Without `IDF_PATH` it downloads ESP-IDF 5.5.5 and a prebuilt toolchain into `~/.cache/esphome/idf`, and that toolchain cannot run on NixOS. With `IDF_PATH` set, as in the dev shell, it uses that ESP-IDF instead. It runs `idf.py` with the first `python` on `PATH`, but its Nix wrapper puts its own Python first, and that Python lacks ESP-IDF's packages. So the dev shell's `esphome` is a small wrapper: it calls the unwrapped script with ESP-IDF's Python first on `PATH`.
+- **The ESP-IDF build stays until step 8.** `main/` is the working reference: when the new firmware misbehaves, the old one can be flashed and run through `verify_tang.py` to compare. `esp-idf-full` no longer evaluates on a current nixpkgs, which is why ESPHome comes from a second nixpkgs input.
+- **Building:** `esphome compile example/tang-ram.yaml`, and `esphome run example/tang-ram.yaml --device /dev/ttyUSB0` to flash and follow the log. Both need the dev shell.
 - **The examples load the component from the tree:**
 
   ```yaml
@@ -72,6 +73,8 @@ The numbers match [Implementation order](esphome-component.md#implementation-ord
 - `clevis encrypt tang` and `clevis decrypt` work against the device;
 - the httpd stack high-water mark during a P-521 `/adv` and `/rec` is logged and leaves room. If not, move the crypto to its own task before going on.
 
+  Measured on an ESP32 (ESP-IDF 5.5.2, log level `DEBUG`): at least 816 of the 4352 bytes stay unused. The low point is the `d`/`x`/`y` check of a rejected `/provision`, not P-521 `/adv` or `/rec`. That is enough for now; step 4 measures again, since PBKDF2 and AES-GCM run on the same stack.
+
 ### 2. `verify_tang.py` for `ram`
 
 - `--token`, sent as `Authorization: Bearer`.
@@ -123,7 +126,7 @@ The numbers match [Implementation order](esphome-component.md#implementation-ord
 ### 8. Clean-up
 
 - `tests/luks-clevis.nix`: `TANG_TOKEN` and `TANG_PASSWORD`; `/wipe` before provisioning; `curl --json` for `/provision`; `-d ''` for empty POSTs. Today's bare `curl -X POST .../deactivate` sends no `Content-Length` and gets 411 from ESPHome.
-- `flake.nix`: drop `esp-idf-full`, `nixpkgs-esp-dev` and the ESP-IDF tooling from the shell; move to one current `nixpkgs`; add a check that runs `esphome config` on the three examples.
+- `flake.nix`: remove the `idf.py`/`make` tooling and its shell hook from the shell, and add a check that runs `esphome config` on the three examples. `esp-idf-full` stays, because ESPHome builds with it (see [Toolchain](#toolchain)). Moving to one current `nixpkgs` needs an ESP-IDF that evaluates there, either a fixed `nixpkgs-esp-dev` or an FHS environment for ESPHome's own download.
 - README: ESPHome setup, `curl --json` in every example, the flash encryption guide.
 - Delete `main/`, `CMakeLists.txt`, `Makefile`, `sdkconfig*`, `dependencies.lock`, `.envrc`'s ESP-IDF exports, and this file.
 
@@ -133,4 +136,5 @@ The numbers match [Implementation order](esphome-component.md#implementation-ord
 |---|---|---|
 | P-521 crypto overflows the 4352-byte httpd stack | step 1, stack high-water mark | a dedicated crypto task with its own stack, fed by a queue |
 | PBKDF2 at 100000 iterations is too slow or trips the watchdog | step 4, timing | lower default; feed the watchdog between PBKDF2 rounds |
+| ESPHome expects a newer ESP-IDF than `esp-idf-full` provides (5.5.5 vs 5.5.2 today) | any compile after a bump | bump `nixpkgs-esp-dev`, or build in an FHS environment with ESPHome's own ESP-IDF |
 | ESPHome changes the web server API again | any update of `nixpkgs-unstable` | the flake pins it; re-check [Request handling](esphome-component.md#request-handling) before bumping |
