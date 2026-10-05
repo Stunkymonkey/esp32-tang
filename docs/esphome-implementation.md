@@ -2,7 +2,7 @@
 
 Status: steps 1 to 4 are done; step 5 is next.
 
-This is the working plan for building the component described in [esphome-component.md](esphome-component.md). The design says *what* the component does. This file says *how to get there from today's `main/`*: the toolchain, what code carries over and what changes in it, and what each step has to show before the next one starts. It is deleted in step 8, together with `main/`.
+This is the working plan for building the component described in [esphome-component.md](esphome-component.md). The design says *what* the component does. This file says *how to get there from today's `main/`*: the toolchain, what code carries over and what changes in it, and what each step has to show before the next one starts. Where the work differs from the plan, [Deviations from the plan](#deviations-from-the-plan) records how and why. It is deleted in step 8, together with `main/`.
 
 ## Toolchain
 
@@ -133,6 +133,56 @@ Done on an ESP32. PBKDF2 has its own loop over mbedTLS's HMAC, because `mbedtls_
 - `flake.nix`: remove the `idf.py`/`make` tooling and its shell hook from the shell, and add a check that runs `esphome config` on the three examples. `esp-idf-full` stays, because ESPHome builds with it (see [Toolchain](#toolchain)). Moving to one current `nixpkgs` needs an ESP-IDF that evaluates there, either a fixed `nixpkgs-esp-dev` or an FHS environment for ESPHome's own download.
 - README: ESPHome setup, `curl --json` in every example, the flash encryption guide.
 - Delete `main/`, `CMakeLists.txt`, `Makefile`, `sdkconfig*`, `dependencies.lock`, `.envrc`'s ESP-IDF exports, and this file.
+
+## Deviations from the plan
+
+Where the work differs from this plan or from the design as it stood before the step, the difference is listed here with the reason. Where the design changed, [esphome-component.md](esphome-component.md) is updated too; this list says what it said before. The measured results stay with each step above.
+
+### Build environment
+
+- **ESPHome does not build through PlatformIO, and not with its own ESP-IDF.**
+  - **Plan:** ESPHome builds with ESP-IDF 5.5.5, downloaded through PlatformIO into `~/.platformio`. Step 8 drops `esp-idf-full` and `nixpkgs-esp-dev`.
+  - **Done:** ESPHome 2026.8 calls `idf.py` itself. The toolchain it downloads into `~/.cache/esphome/idf` cannot run on NixOS, so it builds with `esp-idf-full` 5.5.2 from the dev shell (`IDF_PATH`). The shell's `esphome` is a wrapper: it takes the environment of ESPHome's Nix wrapper (which also brings `esptool`), puts ESP-IDF's Python first on `PATH` and runs the unwrapped script. Without this, `idf.py` runs with a Python that lacks ESP-IDF's packages.
+  - **Consequence:** step 8 keeps `esp-idf-full`. [Toolchain](#toolchain), step 8 and the risk table are updated.
+- **The dev shell leaks a `PYTHONPATH`.** A shell entered before the wrapper existed still carries ESPHome's Python 3.14 packages, and `verify-tang` (Python 3.13) then fails to import `cryptography`. Re-entering the shell fixes it.
+
+### Step 1
+
+- **SHA-384/512 are requested from ESPHome** (`esp32.require_mbedtls_sha512()`). Not in the plan. ESPHome turns them off on ESP-IDF 6 unless a component asks, and ES512 (P-521) and the S384/S512 thumbprints need them.
+- **One body buffer instead of a map keyed by the request pointer.** The httpd task serves one request at a time, so a map is not needed. A request whose body cannot be read to the end never reaches `handleRequest()`; the next request resets its partial body. Design updated.
+- **405 for a component path with the wrong method**, with `Allow`. The design had no status for it; without it, such requests fell through to other handlers or got no answer. Design updated.
+- **401 carries `WWW-Authenticate: Bearer`.** Not in the design.
+- **No CORS header.** The component sends its own responses, so it does not get the `Access-Control-Allow-Origin: *` that `web_server_base` adds to responses sent through `send()`. Pages on other origins cannot read its answers.
+- **The parser is stricter than today's `handlers.h`** beyond the planned whole-payload rejection: `kty` must be `EC`. Thumbprints are computed once per key at load instead of on every request.
+- **The URL buffer (513 bytes) is resolved in a separate, non-inlined function**, so it is off the httpd stack while the crypto runs.
+- **The stack high-water mark is logged after every operation**, not only after `/adv` and `/rec`. The deepest path turned out to be `/provision`.
+
+### Step 2
+
+- **The `/status` details checks have nothing to check yet.** `/status` returns only the state until step 5. The checks pass now and become meaningful with the detailed view.
+- **Each suite ends with `/deactivate` and then `/wipe`.** In step 2, P-256 ended with `/deactivate` and P-521 with `/wipe`; step 3 changed both to do both, so the `nvs` suites start clean.
+
+### Step 3
+
+- **The ESP-IDF NVS API instead of ESPHome's preferences.**
+  - **Plan:** `global_preferences->make_preference<>()` with a fixed hash, a fixed-size struct, `sync()` after the first `/activate` and after `/wipe`, and writes handed to the main loop with `defer()`.
+  - **Done:** one NVS blob, key `keys`, in the namespace `tang_server`, written with `nvs_set_blob()` and `nvs_commit()` from the httpd task, and erased with `nvs_erase_key()`.
+  - **Why:** preferences keep each write in a heap buffer until the next sync and free it without wiping, and comparing with the stored value reads it into another unwiped buffer. They cannot erase a record, and they may only be used from the main loop. NVS is thread-safe, so `/activate` answers only once the record is committed.
+  - Design updated: [Stored key format](esphome-component.md#stored-key-format) and the "Two threads" note.
+- **The record has a variable size**, not a fixed-size struct: magic `TANG`, format version, payload.
+- **The payload is written from the parsed keys** (`kty`, `crv`, `kid`, `key_ops`, `d`, `x`, `y`), not copied from the `/provision` body. It is still the JSON `/provision` accepts, so one parser checks both. This keeps the record small and free of anything else the client sent.
+- **The reboot check was a reset**, through the serial adapter's EN line and later the EN button, not a power cycle. Both clear RAM and keep NVS.
+
+### Step 4
+
+- **The default PBKDF2 iteration count is 20000, not 100000.** This is the fallback the plan named: 100000 iterations took 10 s per `/activate` on an ESP32 (about 100 µs each), 20000 take 2 s. The maximum is 10000000. Design updated.
+- **PBKDF2 is its own loop over mbedTLS's HMAC**, verified against Python's `hashlib`. `mbedtls_pkcs5_pbkdf2_hmac_ext()` runs all iterations in one call and cannot yield; the loop yields every 1000 iterations.
+- **The encrypted record starts with the magic number and has format version `2`.** The design had format version `1` at offset 0 and additional data over bytes 0–32. Now both formats share the 5-byte header, the version tells them apart, and the additional data is bytes 0–36. Design updated.
+- **The GCM context is on the heap.** It is about 800 bytes, which the httpd stack does not have to spare.
+- **`/activate` answers 409 for `active` and `unprovisioned` before it checks the password.** Before, a request without a password on an `unprovisioned` device got 400; the state is the more basic answer.
+- **A record that does not match the configuration is ignored at boot**: plaintext with `require_password`, or encrypted without it. The device boots `unprovisioned` with `last_error` set, and the record stays. The design did not cover this case. Design updated.
+- **The DRBG is seeded in `setup()`.** Its first use, gathering entropy, was the deepest call on the httpd stack.
+- **`verify_tang.py --password` implies `--storage nvs`.**
 
 ## Risks to check early
 
