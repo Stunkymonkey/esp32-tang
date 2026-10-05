@@ -19,7 +19,8 @@ static const char *const TAG = "tang_server.http";
 
 namespace {
 
-enum class Route : uint8_t { NONE, ADV, REC, PROVISION, ACTIVATE, DEACTIVATE, WIPE, STATUS };
+using Route = HttpHandler::Route;
+using Target = HttpHandler::Target;
 
 /// Matches the component's paths. Like tangd ("^/+adv/*$", "^/+adv/+<thp>$"),
 /// one trailing slash after the thumbprint is accepted. A path below /adv/ or
@@ -96,12 +97,6 @@ const char *status_line(int code) {
   }
 }
 
-struct Target {
-  Route route;
-  std::string path;
-  std::string thp;
-};
-
 /// Out of line, so the URL buffer is off the stack before any crypto runs
 /// on the httpd task's small stack.
 __attribute__((noinline)) Target resolve(AsyncWebServerRequest *request) {
@@ -150,12 +145,15 @@ void HttpHandler::handleBody(AsyncWebServerRequest *request, uint8_t *data, size
 }
 
 void HttpHandler::handleRequest(AsyncWebServerRequest *request) {
-  this->handle_(request);
+  Target target = resolve(request);
+  const char *method = method_name(request->method());
+  int status = this->handle_(request, target);
   this->reset_body_();
+  // After the response is sent, for on_request.
+  this->server_->notify_request(target.path, method, status);
 }
 
-void HttpHandler::handle_(AsyncWebServerRequest *request) {
-  Target target = resolve(request);
+int HttpHandler::handle_(AsyncWebServerRequest *request, const Target &target) {
   Route route = target.route;
   const std::string &thp = target.thp;
   const char *path = target.path.c_str();
@@ -165,7 +163,7 @@ void HttpHandler::handle_(AsyncWebServerRequest *request) {
   if (route == Route::NONE) {
     this->send_(request, result);
     ESP_LOGD(TAG, "%s %s -> %d", method_name(method), path, result.status);
-    return;
+    return result.status;
   }
 
   bool is_post = route != Route::ADV && route != Route::STATUS;
@@ -174,7 +172,7 @@ void HttpHandler::handle_(AsyncWebServerRequest *request) {
     result = Result::text(405, "Method not allowed");
     this->send_(request, result);
     ESP_LOGD(TAG, "%s %s -> %d", method_name(method), path, result.status);
-    return;
+    return result.status;
   }
 
   if (is_post) {
@@ -200,7 +198,7 @@ void HttpHandler::handle_(AsyncWebServerRequest *request) {
     if (body_error != nullptr) {
       this->send_(request, result);
       ESP_LOGW(TAG, "%s %s -> %d: body %s", method_name(method), path, result.status, body_error);
-      return;
+      return result.status;
     }
   }
 
@@ -225,12 +223,14 @@ void HttpHandler::handle_(AsyncWebServerRequest *request) {
     httpd_resp_set_hdr(*request, "Retry-After", this->retry_after_);
     result = Result::text(429, "Too many failed attempts. Retry later.");
     ESP_LOGW(TAG, "%s %s: refused by auth backoff for %s s", method_name(method), path, this->retry_after_);
+    this->server_->notify_auth_failure(target.path);
   } else if (checks_token && !(token_ok = this->server_->check_token(authorization))) {
     // A wrong token on /status is an error, not a fallback to the public view.
     this->server_->auth_result(Secret::TOKEN, false);
     httpd_resp_set_hdr(*request, "WWW-Authenticate", "Bearer");
     result = Result::text(401, "Unauthorized");
     ESP_LOGW(TAG, "%s %s: missing or wrong token", method_name(method), path);
+    this->server_->notify_auth_failure(target.path);
   } else {
     if (checks_token)
       this->server_->auth_result(Secret::TOKEN, true);
@@ -265,6 +265,7 @@ void HttpHandler::handle_(AsyncWebServerRequest *request) {
 
   this->send_(request, result);
   ESP_LOGD(TAG, "%s %s -> %d", method_name(method), path, result.status);
+  return result.status;
 }
 
 void HttpHandler::send_(AsyncWebServerRequest *request, const Result &result) {

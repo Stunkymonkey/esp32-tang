@@ -1,6 +1,6 @@
 # Implementation plan: ESPHome `tang_server` component
 
-Status: steps 1 to 5 are done; step 6 is next.
+Status: steps 1 to 6 are done; step 7 is next.
 
 This is the working plan for building the component described in [esphome-component.md](esphome-component.md). The design says *what* the component does. This file says *how to get there from today's `main/`*: the toolchain, what code carries over and what changes in it, and what each step has to show before the next one starts. Where the work differs from the plan, [Deviations from the plan](#deviations-from-the-plan) records how and why; step 8 moves that section into the design. This file is deleted in step 8, together with `main/`.
 
@@ -113,7 +113,7 @@ Done on an ESP32. PBKDF2 has its own loop over mbedTLS's HMAC, because `mbedtls_
 
 **Done when:** `verify_tang.py --check-lockout` passes, and the timers are checked with short values in a test YAML.
 
-Done on an ESP32 with `tests/tang-short-timers.yaml` (`require_password`, `idle_timeout: 20s`, `max_active_time: 60s`, 3 failures, 30 s lockout). `--check-timers` measured 20.5 s and 60.4 s; `--check-lockout` saw Retry-After 1 s, 2 s and then 30 s. The `nvs`, `ram` and no-token setups pass their checks too, and their boot warnings show. The httpd stack low point is now 712 bytes unused, on `/activate` from `locked`.
+Done on an ESP32 with `tests/tang-test.yaml` (`require_password`, `idle_timeout: 20s`, `max_active_time: 60s`, 3 failures, 30 s lockout). `--check-timers` measured 20.5 s and 60.4 s; `--check-lockout` saw Retry-After 1 s, 2 s and then 30 s. The `nvs`, `ram` and no-token setups pass their checks too, and their boot warnings show. The httpd stack low point is now 712 bytes unused, on `/activate` from `locked`.
 
 ### 6. Triggers, actions, conditions
 
@@ -121,6 +121,8 @@ Done on an ESP32 with `tests/tang-short-timers.yaml` (`require_password`, `idle_
 - All triggers fire on the main loop.
 
 **Done when:** a test YAML that logs every trigger shows each one firing for the matching `verify_tang.py` run, and `tang_server.activate` unlocks a `require_password` device through the API.
+
+Done on an ESP32 with `tests/tang-test.yaml`. A `verify_tang.py --password --check-timers --check-lockout` run fired all eight triggers, `on_deactivate` with all four reasons and `on_rejected` with all three states. `tests/tang_api.py` ran the API actions: a wrong password got 401 with `on_auth_failure`, the right one unlocked the device, `tang_server.deactivate` and `tang_server.wipe` worked, and the conditions matched each state. The build fails for an `activate` action whose password does not match `require_password`, or with `ram`. With `/activate` in the activation task, the httpd stack low point is back to 840 bytes unused, on a rejected `/provision`.
 
 ### 7. Entities and buttons
 
@@ -196,8 +198,19 @@ Where the work differs from this plan or from the design as it stood before the 
 - **While `locked` without a password, `/status` lists the stored keys as they were when deactivated.** Reading and checking the record on every `/status` would run the key-pair check on the httpd stack. Design updated.
 - **`loop()` uses `try_lock()`** and skips a round while `/activate` holds the lock, as planned in the risk table. Without timers, `loop()` is disabled.
 - **The warnings are in `dump_config()`**, so they show at boot and whenever a log client connects. The plaintext warning also shows when keys are stored.
-- **The test YAML is `tests/tang-short-timers.yaml`.** It reads the examples' secrets through a `tests/secrets.yaml` symlink, which is git-ignored.
+- **The test YAML is `tests/tang-test.yaml`.** It reads the examples' secrets through a `tests/secrets.yaml` symlink, which is git-ignored.
 - **`verify_tang.py` waits out the backoff** after each failure it causes on purpose, and before it starts, so a lockout left by an earlier run does not fail the next one.
+
+### Step 6
+
+- **Activations run in their own task**, from HTTP and from the action. The plan's fallback for the stack, a crypto task, applied to `/activate` only: the triggers added two call frames to its path, and the low point fell to 604 bytes. `/activate` now waits for the task, so the httpd stack holds no PBKDF2, AES-GCM or key check; the low point is 840 bytes again. `/provision`, `/adv` and `/rec` stay on the httpd stack. Design updated.
+- **`tang_server.activate` returns at once.** Running PBKDF2 on the main loop would block it for 2 s, or 10 s at 100000 iterations, close to the loop watchdog. Its result shows in `on_activate`. Design updated.
+- **One activation at a time.** A second `/activate` gets 409 while one runs; a second action logs a warning. Not in the design. Design updated.
+- **The password checks of `tang_server.activate` run at build time**, in its code generation, because an action's schema cannot see the component's configuration. Design updated.
+- **`on_activate` fires for 400 and 409 as well**: every attempt that passed the token check and the backoff, as the design says, including those that fail before the keys are touched. The design now says so explicitly.
+- **`on_state_change` at boot fires once, with the state after loading the stored keys.** The changes while loading are not reported on their own. Design updated.
+- **`on_auth_failure` from the action has the path `tang_server.activate`.** The design did not say. Design updated.
+- **`tests/tang-short-timers.yaml` became `tests/tang-test.yaml`**, with a log line for every trigger and API actions for the actions and conditions. `tests/tang_api.py` calls those actions through the ESPHome API, as Home Assistant would.
 
 ## Risks to check early
 

@@ -6,6 +6,9 @@
 #include <strings.h>
 
 #include <esp_flash_encrypt.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+#include <freertos/task.h>
 
 #include "esphome/core/hal.h"
 #include "esphome/core/log.h"
@@ -50,6 +53,11 @@ void TangServer::setup() {
   // loop() only runs the auto-deactivation timers.
   if (this->max_active_ms_ == 0 && this->idle_timeout_ms_ == 0)
     this->disable_loop();
+
+  // on_state_change fires once at boot with the initial state; the changes
+  // while loading the stored keys are not reported on their own.
+  this->setup_done_ = true;
+  this->fire_(this->state_callback_, std::string(state_to_string(this->state_)));
 }
 
 void TangServer::loop() {
@@ -140,10 +148,12 @@ void TangServer::load_at_boot_() {
     error = "they are encrypted, but require_password is not set";
   if (result != KeyStore::LoadResult::OK) {
     this->set_last_error_("Stored keys ignored: " + error);
+    this->fire_(this->activate_callback_, false);
     return;
   }
   ESP_LOGI(TAG, "Activated %zu stored keys", this->keys_.size());
   this->set_state_(State::ACTIVE);
+  this->fire_(this->activate_callback_, true);
 }
 
 KeyStore::LoadResult TangServer::load_stored_keys_(std::string &error, const std::string *password) {
@@ -187,54 +197,66 @@ bool TangServer::check_token(const optional<std::string> &authorization) const {
   return diff == 0;
 }
 
-Result TangServer::inactive_result_() const {
-  // Clevis treats this as a failure and falls back to the passphrase.
-  std::string body = "Server not active (";
-  body += state_to_string(this->state_);
-  body += ")";
-  return {503, "text/plain", body};
+Result TangServer::inactive_result_(const std::string &path) {
+  // Clevis treats this as a failure and falls back to the passphrase. In
+  // practice, a client is waiting to be unlocked: on_rejected says so.
+  std::string state = state_to_string(this->state_);
+  this->fire_(this->rejected_callback_, path, state);
+  return {503, "text/plain", "Server not active (" + state + ")"};
 }
 
 Result TangServer::adv(const std::string &thp) {
   LockGuard guard(this->lock_);
   if (this->state_ != State::ACTIVE)
-    return this->inactive_result_();
+    return this->inactive_result_(thp.empty() ? std::string("/adv") : "/adv/" + thp);
   Result result = build_adv(this->keys_, thp);
-  if (result.status == 200)
+  if (result.status == 200) {
     this->adv_count_++;
+    this->fire_(this->adv_callback_, thp);
+  }
   return result;
 }
 
 Result TangServer::rec(const std::string &thp, const std::vector<uint8_t> &body) {
   LockGuard guard(this->lock_);
   if (this->state_ != State::ACTIVE)
-    return this->inactive_result_();
+    return this->inactive_result_("/rec/" + thp);
   Result result = exchange(this->keys_, thp, reinterpret_cast<const char *>(body.data()), body.size());
   if (result.status == 200) {
     this->recovery_count_++;
     // Only a successful recovery restarts the idle timer.
     this->last_recovery_ms_ = millis();
   }
+  this->fire_(this->recovery_callback_, thp, result.status == 200);
   return result;
 }
 
 Result TangServer::provision(const std::vector<uint8_t> &body) {
   LockGuard guard(this->lock_);
+  // With ram, provisioning is how the server becomes active, so every
+  // attempt counts as an activation attempt.
+  const bool ram = this->key_storage_ == KeyStorage::RAM;
   // Replacing keys always takes an explicit /wipe first, so a stray
   // provision cannot overwrite the keys existing bindings depend on.
-  if (this->state_ != State::UNPROVISIONED)
+  if (this->state_ != State::UNPROVISIONED) {
+    if (ram)
+      this->fire_(this->activate_callback_, false);
     return Result::text(409, "Already provisioned. Wipe first.");
+  }
 
   std::string error;
   if (!parse_keys(reinterpret_cast<const char *>(body.data()), body.size(), this->keys_, error)) {
     ESP_LOGW(TAG, "Provision rejected: %s", error.c_str());
+    if (ram)
+      this->fire_(this->activate_callback_, false);
     return {400, "text/plain", error};
   }
 
   ESP_LOGI(TAG, "Provisioned %zu keys", this->keys_.size());
-  if (this->key_storage_ == KeyStorage::RAM) {
+  if (ram) {
     // Nothing to store, so provisioning activates directly.
     this->set_state_(State::ACTIVE);
+    this->fire_(this->activate_callback_, true);
     return Result::text(200, "Provisioned and active.");
   }
   // Provisioning never writes to flash; the first /activate stores the keys.
@@ -243,28 +265,41 @@ Result TangServer::provision(const std::vector<uint8_t> &body) {
 }
 
 Result TangServer::activate(const std::vector<uint8_t> &body) {
-  LockGuard guard(this->lock_);
-
-  // {"password": "..."} with require_password, else no body. A mismatch is
-  // refused, so a wrong setup shows up instead of storing keys in a way the
-  // user did not expect.
+  // {"password": "..."} with require_password, else no body.
   std::string password;
   ScopedWipe<std::string> wipe_password{password};
   bool has_password = false;
   if (!body.empty()) {
     JsonDocument doc(WipingAllocator::instance());
-    if (deserializeJson(doc, reinterpret_cast<const char *>(body.data()), body.size()) || !doc.is<JsonObject>())
-      return Result::text(400, "Invalid JSON");
+    bool valid = !deserializeJson(doc, reinterpret_cast<const char *>(body.data()), body.size()) &&
+                 doc.is<JsonObject>();
     JsonVariantConst value = doc["password"];
-    has_password = !value.isNull();
+    has_password = valid && !value.isNull();
+    if (!valid || (has_password && !value.is<const char *>())) {
+      this->fire_(this->activate_callback_, false);
+      return Result::text(400, valid ? "The password must be a string" : "Invalid JSON");
+    }
     if (has_password) {
-      if (!value.is<const char *>())
-        return Result::text(400, "The password must be a string");
       const char *p = value.as<const char *>();
       password.reserve(strlen(p));
       password = p;
     }
   }
+  // The activation runs in its own task with a bigger stack; the httpd task
+  // waits for it.
+  return this->run_activation_(password, has_password, "/activate");
+}
+
+Result TangServer::activate_(const std::string &password, bool has_password, const char *source) {
+  LockGuard guard(this->lock_);
+  Result result = this->activate_locked_(password, has_password, source);
+  this->fire_(this->activate_callback_, result.status == 200);
+  return result;
+}
+
+Result TangServer::activate_locked_(const std::string &password, bool has_password, const char *source) {
+  // A password mismatch is refused, so a wrong setup shows up instead of
+  // storing keys in a way the user did not expect.
   // Nothing to activate comes first, so the password is not sent for nothing.
   if (this->state_ == State::ACTIVE)
     return Result::text(409, "Already active.");
@@ -303,8 +338,9 @@ Result TangServer::activate(const std::vector<uint8_t> &body) {
           break;
         case KeyStore::LoadResult::WRONG_PASSWORD:
           // A corrupt record looks the same; the tag check cannot tell.
-          ESP_LOGW(TAG, "/activate: wrong password");
+          ESP_LOGW(TAG, "%s: wrong password", source);
           this->auth_result(Secret::PASSWORD, false);
+          this->fire_(this->auth_failure_callback_, std::string(source));
           return Result::text(401, "Wrong password");
         default:
           this->set_last_error_("Cannot activate: " + error);
@@ -325,8 +361,9 @@ Result TangServer::deactivate() {
 
 void TangServer::deactivate_(const char *reason) {
   if (this->state_ != State::ACTIVE && this->state_ != State::PENDING)
-    return;  // no keys in RAM
+    return;  // no keys in RAM, nothing to report
   ESP_LOGI(TAG, "Deactivating (%s)", reason);
+  this->fire_(this->deactivate_callback_, std::string(reason));
   // Stored keys stay and can be activated again. Keys that were never
   // stored (ram, or pending) are gone.
   bool stored = this->state_ == State::ACTIVE && this->key_storage_ == KeyStorage::NVS;
@@ -338,8 +375,13 @@ void TangServer::deactivate_(const char *reason) {
 
 Result TangServer::wipe() {
   LockGuard guard(this->lock_);
-  if (this->state_ != State::UNPROVISIONED)
+  // Reported whenever there are keys anywhere: in RAM, in NVS, or both.
+  bool had_keys = this->state_ == State::ACTIVE || this->state_ == State::PENDING ||
+                  (this->key_storage_ == KeyStorage::NVS && this->store_.exists());
+  if (had_keys) {
     ESP_LOGI(TAG, "Wiping");
+    this->fire_(this->deactivate_callback_, std::string("wipe"));
+  }
   this->clear_keys_();
   this->stored_info_.clear();
   if (this->key_storage_ == KeyStorage::NVS) {
@@ -488,6 +530,8 @@ void TangServer::set_state_(State state) {
     return;
   ESP_LOGI(TAG, "State: %s -> %s", state_to_string(this->state_), state_to_string(state));
   this->state_ = state;
+  if (this->setup_done_)
+    this->fire_(this->state_callback_, std::string(state_to_string(state)));
   if (state == State::ACTIVE) {
     // Every way of becoming active counts as one activation and starts
     // both timers.
@@ -495,6 +539,103 @@ void TangServer::set_state_(State state) {
     this->active_since_ms_ = millis();
     this->last_recovery_ms_ = this->active_since_ms_;
   }
+}
+
+}  // namespace esphome::tang_server
+
+namespace esphome::tang_server {
+
+void TangServer::notify_request(const std::string &path, const char *method, int status) {
+  this->fire_(this->request_callback_, path, std::string(method), status);
+}
+
+void TangServer::notify_auth_failure(const std::string &path) { this->fire_(this->auth_failure_callback_, path); }
+
+/// One activation, run in its own task. With `done` set, the caller waits
+/// on it and takes `result`; without, the task frees the job.
+struct TangServer::ActivateJob {
+  TangServer *server;
+  std::string password;
+  bool has_password;
+  const char *source;
+  /// The action goes through the backoff here; /activate already did.
+  bool check_backoff;
+  SemaphoreHandle_t done{nullptr};
+  Result result{500, "text/plain", "Activation did not run"};
+};
+
+bool TangServer::start_activation_(ActivateJob *job, const std::string *password) {
+  if (password != nullptr) {
+    // Sized once, so the copy never reallocates and leaves one behind.
+    job->password.reserve(password->size());
+    job->password = *password;
+  }
+  // 8 KB, about twice what the httpd task has: PBKDF2, AES-GCM and the key
+  // checks run here. Same priority as the main loop, which keeps running.
+  if (xTaskCreate(&TangServer::activate_task_, "tang_activate", 8192, job, 1, nullptr) == pdPASS)
+    return true;
+  ESP_LOGE(TAG, "%s: cannot start the activation task", job->source);
+  tang_server::wipe(job->password);
+  this->activation_running_ = false;
+  return false;
+}
+
+Result TangServer::run_activation_(const std::string &password, bool has_password, const char *source) {
+  if (this->activation_running_.exchange(true))
+    return Result::text(409, "An activation is already running.");
+  // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+  auto *job = new ActivateJob{this, {}, has_password, source, false, xSemaphoreCreateBinary()};
+  Result result = Result::text(500, "Cannot start the activation");
+  if (job->done != nullptr && this->start_activation_(job, &password)) {
+    xSemaphoreTake(job->done, portMAX_DELAY);
+    result = std::move(job->result);
+  } else if (job->done == nullptr) {
+    this->activation_running_ = false;
+  }
+  if (job->done != nullptr)
+    vSemaphoreDelete(job->done);
+  delete job;  // NOLINT(cppcoreguidelines-owning-memory)
+  return result;
+}
+
+void TangServer::activate_in_background(const std::string *password) {
+  static const char *const SOURCE = "tang_server.activate";
+  if (this->activation_running_.exchange(true)) {
+    ESP_LOGW(TAG, "%s: an activation is already running", SOURCE);
+    return;
+  }
+  // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+  auto *job = new ActivateJob{this, {}, password != nullptr, SOURCE, true};
+  if (!this->start_activation_(job, password))
+    delete job;  // NOLINT(cppcoreguidelines-owning-memory)
+}
+
+void TangServer::activate_task_(void *arg) {
+  auto *job = static_cast<ActivateJob *>(arg);
+  TangServer *server = job->server;
+  {
+    ScopedWipe<std::string> wipe_password{job->password};
+    uint32_t blocked_ms =
+        job->check_backoff && server->require_password_ ? server->auth_blocked_ms(false, true) : 0;
+    if (blocked_ms != 0) {
+      ESP_LOGW(TAG, "%s: refused by auth backoff for %" PRIu32 " s", job->source, (blocked_ms + 999) / 1000);
+      server->notify_auth_failure(job->source);
+    } else {
+      job->result = server->activate_(job->password, job->has_password, job->source);
+      if (job->done == nullptr) {
+        // No one waits for the result, so log it.
+        ESP_LOGI(TAG, "%s -> %d: %s", job->source, job->result.status, job->result.body.c_str());
+      }
+    }
+  }
+  server->activation_running_ = false;
+  if (job->done != nullptr) {
+    // The waiting caller frees the job.
+    xSemaphoreGive(job->done);
+  } else {
+    delete job;  // NOLINT(cppcoreguidelines-owning-memory)
+  }
+  vTaskDelete(nullptr);
 }
 
 }  // namespace esphome::tang_server

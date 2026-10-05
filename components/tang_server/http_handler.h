@@ -28,8 +28,16 @@ class HttpHandler : public AsyncWebHandler {
   /// Bodies above this are refused with 413 before they are buffered.
   static constexpr size_t MAX_BODY_SIZE = 4096;
 
+  enum class Route : uint8_t { NONE, ADV, REC, PROVISION, ACTIVATE, DEACTIVATE, WIPE, STATUS };
+  struct Target {
+    Route route;
+    std::string path;
+    std::string thp;
+  };
+
  protected:
-  void handle_(AsyncWebServerRequest *request);
+  /// Handles a matched request and sends the response. @return its status.
+  int handle_(AsyncWebServerRequest *request, const Target &target);
   void send_(AsyncWebServerRequest *request, const Result &result);
   void reset_body_();
   void log_stack_();

@@ -1,6 +1,8 @@
 #pragma once
 
+#include <atomic>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "esphome/components/web_server_base/web_server_base.h"
@@ -55,6 +57,8 @@ class TangServer : public Component {
   }
 
   KeyStorage get_key_storage() const { return this->key_storage_; }
+  /// Safe from any task; for conditions.
+  State get_state() const { return this->state_; }
   bool get_require_password() const { return this->require_password_; }
   bool has_admin_token() const { return this->admin_token_ != nullptr; }
   /// Constant-time check of an `Authorization` header against `admin_token`.
@@ -72,9 +76,32 @@ class TangServer : public Component {
   Result rec(const std::string &thp, const std::vector<uint8_t> &body);
   Result provision(const std::vector<uint8_t> &body);
   Result activate(const std::vector<uint8_t> &body);
+  Result status(bool detailed);
+
+  // HTTP operations that the actions use too; callable from any task.
   Result deactivate();
   Result wipe();
-  Result status(bool detailed);
+
+  /// tang_server.activate: runs the activation in its own task, so PBKDF2
+  /// neither blocks the main loop nor needs the small httpd stack. `password`
+  /// is copied; nullptr means none was given.
+  void activate_in_background(const std::string *password);
+
+  // Events from the HTTP handler, for the triggers.
+  void notify_request(const std::string &path, const char *method, int status);
+  void notify_auth_failure(const std::string &path);
+
+  // Triggers. The callbacks run on the main loop.
+  template<typename F> void add_on_activate_callback(F &&f) { this->activate_callback_.add(std::forward<F>(f)); }
+  template<typename F> void add_on_deactivate_callback(F &&f) { this->deactivate_callback_.add(std::forward<F>(f)); }
+  template<typename F> void add_on_state_change_callback(F &&f) { this->state_callback_.add(std::forward<F>(f)); }
+  template<typename F> void add_on_recovery_callback(F &&f) { this->recovery_callback_.add(std::forward<F>(f)); }
+  template<typename F> void add_on_adv_callback(F &&f) { this->adv_callback_.add(std::forward<F>(f)); }
+  template<typename F> void add_on_request_callback(F &&f) { this->request_callback_.add(std::forward<F>(f)); }
+  template<typename F> void add_on_auth_failure_callback(F &&f) {
+    this->auth_failure_callback_.add(std::forward<F>(f));
+  }
+  template<typename F> void add_on_rejected_callback(F &&f) { this->rejected_callback_.add(std::forward<F>(f)); }
 
  protected:
   /// Loads stored keys at boot and, without require_password, activates them.
@@ -90,7 +117,22 @@ class TangServer : public Component {
   /// material.
   void set_last_error_(const std::string &error);
   void set_state_(State state);
-  Result inactive_result_() const;
+  Result inactive_result_(const std::string &path);
+  /// Every activation attempt, from HTTP or the action. Fires on_activate
+  /// with the result.
+  Result activate_(const std::string &password, bool has_password, const char *source);
+  Result activate_locked_(const std::string &password, bool has_password, const char *source);
+  struct ActivateJob;
+  /// Starts the activation task for `job`, copying `password` into it.
+  bool start_activation_(ActivateJob *job, const std::string *password);
+  /// Runs one activation in the activation task and waits for its result.
+  Result run_activation_(const std::string &password, bool has_password, const char *source);
+  static void activate_task_(void *arg);
+
+  /// Runs the callbacks on the main loop, with copies of the arguments.
+  template<typename... Ts, typename... As> void fire_(CallbackManager<void(Ts...)> &callbacks, As &&...args) {
+    this->defer([&callbacks, args...]() { callbacks.call(args...); });
+  }
   /// Drops the keys from RAM and moves to locked or unprovisioned.
   void deactivate_(const char *reason);
   std::vector<KeyInfo> key_info_() const;
@@ -115,7 +157,9 @@ class TangServer : public Component {
   uint32_t lockout_ms_{5 * 60 * 1000};
 
   Mutex lock_;
-  State state_{State::UNPROVISIONED};
+  std::atomic<State> state_{State::UNPROVISIONED};
+  std::atomic<bool> activation_running_{false};
+  bool setup_done_{false};
   std::vector<TangKey> keys_;
   KeyStore store_;
   std::string last_error_;
@@ -132,6 +176,15 @@ class TangServer : public Component {
   Backoff token_backoff_;
   Backoff password_backoff_;
   uint32_t auth_failure_count_{0};
+
+  CallbackManager<void(bool)> activate_callback_;
+  CallbackManager<void(const std::string &)> deactivate_callback_;
+  CallbackManager<void(const std::string &)> state_callback_;
+  CallbackManager<void(const std::string &, bool)> recovery_callback_;
+  CallbackManager<void(const std::string &)> adv_callback_;
+  CallbackManager<void(const std::string &, const std::string &, int)> request_callback_;
+  CallbackManager<void(const std::string &)> auth_failure_callback_;
+  CallbackManager<void(const std::string &, const std::string &)> rejected_callback_;
 };
 
 }  // namespace esphome::tang_server

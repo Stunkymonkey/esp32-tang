@@ -260,7 +260,7 @@ Some of these notes come from an earlier ESPHome port (cherjr/esp32-tang, branch
 - **Starting the server.** `web_server_base` only listens once a consumer calls `init()`. `web_server` and `captive_portal` do so, but the component may be the only consumer, so its `setup()` calls `init()` itself. `init()` is reference-counted, so this is safe alongside the others.
 - **Client IP.** The request type has no remote address. `last_client_ip` comes from `getpeername()` on `httpd_req_to_sockfd()`.
 - **Two threads.** Handlers run in the httpd task, while timers, actions, buttons and entities run in ESPHome's main loop. A mutex guards the keys and the state. Everything that ESPHome expects on the main loop is handed over with `defer()`: firing triggers and publishing entity states. The key record is written through the NVS API, which is thread-safe, so the httpd task writes it directly (see [Stored key format](#stored-key-format)).
-- **Stack size.** The httpd task has a 4352-byte stack (`HTTPD_DEFAULT_CONFIG()` plus 256 bytes), and ESPHome offers no option to change it. The old firmware ran its P-521 operations on an 8 KB stack. Large buffers stay off the stack, and the stack high-water mark is measured during `/adv` and `/rec`. If it does not fit, the crypto moves to a dedicated task with its own stack.
+- **Stack size.** The httpd task has a 4352-byte stack (`HTTPD_DEFAULT_CONFIG()` plus 256 bytes), and ESPHome offers no option to change it. The old firmware ran its P-521 operations on an 8 KB stack. Large buffers stay off the stack, and the stack high-water mark is logged after every request. Activations, from `/activate` and from the action, run in their own task with an 8 KB stack: they hold PBKDF2, AES-GCM and the key-pair checks, the deepest path. `/activate` waits for that task; one activation runs at a time, and a second one gets 409. `/provision`, `/adv` and `/rec` stay on the httpd stack.
 
 A `password` in the `/activate` body is required with `require_password` and rejected without it. A 400 for a mismatch makes a wrong setup obvious, instead of silently storing keys in a way the user did not expect.
 
@@ -333,9 +333,9 @@ A wrong token on `/status` counts as an auth failure and returns 401; it does no
 
 | Trigger | Variables | Fires when |
 |---|---|---|
-| `on_activate` | `bool success` | every activate attempt that passed the token check (if any), with its result; every `ram` provision attempt; and the automatic activation at boot in the plain `nvs` setup |
+| `on_activate` | `bool success` | every activate attempt that passed the token check (if any) and the backoff, with its result, including 400 and 409; every `ram` provision attempt; and the automatic activation at boot in the plain `nvs` setup |
 | `on_deactivate` | `std::string reason` | keys are removed from RAM, from NVS, or both. `reason` is `manual`, `max_active_time`, `idle_timeout` or `wipe`. |
-| `on_state_change` | `std::string state` | the state changes. `state` is `unprovisioned`, `pending`, `locked` or `active`. Also fires once at boot with the initial state. |
+| `on_state_change` | `std::string state` | the state changes. `state` is `unprovisioned`, `pending`, `locked` or `active`. Also fires once at boot with the initial state, after the stored keys are loaded; the changes while loading them are not reported on their own. |
 | `on_recovery` | `std::string thp`, `bool success` | every `/rec/<thp>` request that reached an active server |
 | `on_adv` | `std::string thp` | every successful `/adv` request. `thp` is empty for `/adv` and `/adv/`. |
 | `on_request` | `std::string path`, `std::string method`, `int status` | every request handled by the component, after the response is sent |
@@ -343,6 +343,8 @@ A wrong token on `/status` counts as an auth failure and returns 401; it does no
 | `on_rejected` | `std::string path`, `std::string reason` | `/adv` or `/rec` refused with 503. `reason` is `unprovisioned`, `pending` or `locked`. In practice, a client is waiting to be unlocked. |
 
 There is no `on_wipe`; `on_deactivate` with `reason == "wipe"` covers it.
+
+Every trigger runs on the main loop, whichever task the event happened in: the component hands it over with `defer()`, so the events of one request may arrive a loop iteration later. `path` is the request path; for the action, `on_auth_failure` gets `tang_server.activate` instead.
 
 `on_deactivate` with reason `manual` covers HTTP, the action and the button alike. A `/deactivate` request on an `unprovisioned` or `locked` device succeeds but fires nothing, because there are no keys in RAM to remove. A `/deactivate` in `pending` does fire, because it drops the provisioned keys. A `/wipe` fires whenever there are keys anywhere: in RAM (`pending`, `active`), in NVS (`locked`), or both.
 
@@ -362,11 +364,13 @@ tang_server:
 
 | Action | Storage | Notes |
 |---|---|---|
-| `tang_server.activate` | `nvs` | Same as `/activate`, from `pending` or `locked`. `password:` is templatable. It is required with `require_password` and rejected without it. It goes through the same backoff as HTTP. |
+| `tang_server.activate` | `nvs` | Same as `/activate`, from `pending` or `locked`. `password:` is templatable. It is required with `require_password` and rejected without it; the build fails otherwise, and with `key_storage: ram`. It goes through the same backoff as HTTP. It returns at once: the activation runs in its own task, so PBKDF2 does not block the main loop. Its result shows in `on_activate`. |
 | `tang_server.deactivate` | all | Reason `manual`. |
 | `tang_server.wipe` | all | Reason `wipe`. |
 
 Actions never need `admin_token`: whoever can run them already controls the device through the ESPHome API. There is no provision action: keys come from off-device, so they come over HTTP.
+
+`tang_server.deactivate` and `tang_server.wipe` wait for the lock, so while an activation runs, they hold up the main loop until it is done: about 2 s at the default PBKDF2 cost.
 
 To let Home Assistant unlock a `require_password` device after every boot, expose the action through `api: actions:`:
 
