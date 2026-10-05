@@ -2,7 +2,7 @@
 
 Status: steps 1 to 4 are done; step 5 is next.
 
-This is the working plan for building the component described in [esphome-component.md](esphome-component.md). The design says *what* the component does. This file says *how to get there from today's `main/`*: the toolchain, what code carries over and what changes in it, and what each step has to show before the next one starts. Where the work differs from the plan, [Deviations from the plan](#deviations-from-the-plan) records how and why. It is deleted in step 8, together with `main/`.
+This is the working plan for building the component described in [esphome-component.md](esphome-component.md). The design says *what* the component does. This file says *how to get there from today's `main/`*: the toolchain, what code carries over and what changes in it, and what each step has to show before the next one starts. Where the work differs from the plan, [Deviations from the plan](#deviations-from-the-plan) records how and why; step 8 moves that section into the design. This file is deleted in step 8, together with `main/`.
 
 ## Toolchain
 
@@ -132,6 +132,7 @@ Done on an ESP32. PBKDF2 has its own loop over mbedTLS's HMAC, because `mbedtls_
 - `tests/luks-clevis.nix`: `TANG_TOKEN` and `TANG_PASSWORD`; `/wipe` before provisioning; `curl --json` for `/provision`; `-d ''` for empty POSTs. Today's bare `curl -X POST .../deactivate` sends no `Content-Length` and gets 411 from ESPHome.
 - `flake.nix`: remove the `idf.py`/`make` tooling and its shell hook from the shell, and add a check that runs `esphome config` on the three examples. `esp-idf-full` stays, because ESPHome builds with it (see [Toolchain](#toolchain)). Moving to one current `nixpkgs` needs an ESP-IDF that evaluates there, either a fixed `nixpkgs-esp-dev` or an FHS environment for ESPHome's own download.
 - README: ESPHome setup, `curl --json` in every example, the flash encryption guide.
+- Move [Deviations from the plan](#deviations-from-the-plan) into [esphome-component.md](esphome-component.md) as a section on how the implementation differs from the original design, so the reasons outlive this file.
 - Delete `main/`, `CMakeLists.txt`, `Makefile`, `sdkconfig*`, `dependencies.lock`, `.envrc`'s ESP-IDF exports, and this file.
 
 ## Deviations from the plan
