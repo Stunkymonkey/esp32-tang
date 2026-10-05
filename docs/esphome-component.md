@@ -124,7 +124,10 @@ Deactivate and wipe overwrite the private keys in RAM with `mbedtls_platform_zer
 - the password from `/activate`, the action or the button, once the attempt has finished;
 - the derived AES key;
 - the decrypted `{"keys": [...]}` JSON, once it has been parsed;
-- the request body buffers of `/provision` and `/activate`.
+- the request body buffers of `/provision` and `/activate`;
+- the parsed JSON documents of `/provision`, `/activate` and the stored record.
+
+The last point needs care: ArduinoJson 7, which ESPHome uses, has no zero-copy parsing, so the document copies every string, including `d`, into its own memory pool. Every JSON document that may hold a secret therefore uses an `ArduinoJson::Allocator` that wipes memory before it frees it. Its `reallocate()` allocates, copies and wipes the old block rather than calling `realloc()`, which could leave a copy behind. `deallocate()` gets no size, so it uses `heap_caps_get_allocated_size()`.
 
 This keeps secrets in RAM only while they are needed. Someone who can read the RAM of an `active` device still gets the keys.
 
@@ -220,11 +223,18 @@ Like tangd, `/adv/<thp>` and `/rec/<thp>` accept a key's RFC 7638 thumbprint in 
 
 ### Request handling
 
-These notes come from an earlier ESPHome port (cherjr/esp32-tang, branch `fix/esphome-tang-runtime`) that ran into each of them:
-- **Bodies arrive in `handleBody()`.** On ESP-IDF, `web_server_base` has already read the request body from the socket before `handleRequest()` runs. It passes the body to `handleBody()` in chunks. Reading the socket again in `handleRequest()` gets nothing. The handler therefore collects the chunks per request and processes the complete body in `handleRequest()`. The ESP-IDF request type has no per-request scratch pointer, so the buffers are kept in a map keyed by the request pointer, and every path out of `handleRequest()` removes the entry. `isRequestHandlerTrivial()` returns `false`, otherwise `handleBody()` is never called.
+Some of these notes come from an earlier ESPHome port (cherjr/esp32-tang, branch `fix/esphome-tang-runtime`) that ran into them. All were checked against the ESP-IDF web server (`web_server_idf`) of ESPHome 2026.8.0, the version the flake pins.
+- **Bodies arrive in `handleBody()`.** For a POST whose `Content-Type` is anything but form data (for example `application/json`, or the `application/jwk+json` Clevis sends), `web_server_base` reads the body from the socket itself, before `handleRequest()` runs. It passes the body to `handleBody()` in chunks. Reading the socket again in `handleRequest()` gets nothing. The handler therefore collects the chunks per request and processes the complete body in `handleRequest()`. The ESP-IDF request type has no per-request scratch pointer, so the buffers are kept in a map keyed by the request pointer, and every path out of `handleRequest()` removes the entry. `isRequestHandlerTrivial()` returns `false`, which ESPHome 2026.8.0 does not check but the Arduino-style API expects.
+- **Form-encoded bodies never reach the handler.** With `Content-Type: application/x-www-form-urlencoded`, or none at all, the server reads the body into its own form parser and never calls `handleBody()`; above 1024 bytes it answers 400 before the component sees the request. `curl -d` sends exactly that header. A non-empty body that did not come through `handleBody()` is therefore refused with 415. Clients send JSON with `curl --json`, or `-H 'Content-Type: application/json'`.
+- **`Content-Length` is required.** The server answers a POST without it with 411 before the component sees it. A bare `curl -X POST` sends no `Content-Length`; requests without a body use `curl -X POST -d ''` or `curl --json ''`.
 - **Body size limit.** A body larger than 4096 bytes is refused with 413 before it is buffered. Two P-521 keys with their private parts fit well below that limit. A chunk that arrives out of order or does not add up to `Content-Length` gives 400.
-- **Sending responses.** On ESP-IDF, the component sends responses with `httpd_resp_set_status`, `httpd_resp_set_type` and `httpd_resp_send`. `httpd_resp_set_status` needs the full status line, such as `"503 Service Unavailable"`, so the component keeps a table for every code it uses. `Retry-After` on 429 is set with `httpd_resp_set_hdr`.
-- **Only Tang paths.** `canHandle()` accepts only the component's own paths, so `web_server` keeps serving everything else.
+- **Sending responses.** `AsyncWebServerRequest::send()` only knows 200, 204, 400, 401, 404, 409 and 422 and turns every other code into 500. The component therefore sends responses with `httpd_resp_set_status`, `httpd_resp_set_type` and `httpd_resp_send`. `httpd_resp_set_status` needs the full status line, such as `"503 Service Unavailable"`, so the component keeps a table for every code it uses. `Retry-After` on 429 is set with `httpd_resp_set_hdr`.
+- **Only Tang paths.** `canHandle()` accepts only the component's own paths, so `web_server` keeps serving everything else. It reads the path with `url_to()`; `url()` is removed in ESPHome 2026.9.0.
+- **No web server login.** The handler is registered with `add_handler_without_auth()`. `add_handler()` would put it behind `web_server`'s `auth:` when that is configured, and Clevis cannot log in. `admin_token` is the component's own protection.
+- **Starting the server.** `web_server_base` only listens once a consumer calls `init()`. `web_server` and `captive_portal` do so, but the component may be the only consumer, so its `setup()` calls `init()` itself. `init()` is reference-counted, so this is safe alongside the others.
+- **Client IP.** The request type has no remote address. `last_client_ip` comes from `getpeername()` on `httpd_req_to_sockfd()`.
+- **Two threads.** Handlers run in the httpd task, while timers, actions, buttons and entities run in ESPHome's main loop. A mutex guards the keys and the state. Everything that ESPHome expects on the main loop is handed over with `defer()`: firing triggers, publishing entity states and writing preferences. `captive_portal` defers its NVS writes the same way.
+- **Stack size.** The httpd task has a 4352-byte stack (`HTTPD_DEFAULT_CONFIG()` plus 256 bytes), and ESPHome offers no option to change it. The old firmware ran its P-521 operations on an 8 KB stack. Large buffers stay off the stack, and the stack high-water mark is measured during `/adv` and `/rec`. If it does not fit, the crypto moves to a dedicated task with its own stack.
 
 A `password` in the `/activate` body is required with `require_password` and rejected without it. A 400 for a mismatch makes a wrong setup obvious, instead of silently storing keys in a way the user did not expect.
 
@@ -244,6 +254,8 @@ Both endpoints exist in every setup, so the same scripts work everywhere.
 | 413 | request body larger than 4096 bytes |
 | 404 | unknown path; `/activate` with `ram`; `/adv/<thp>` or `/rec/<thp>` for an unknown thumbprint |
 | 409 | `/provision` while not `unprovisioned` (wipe first); `/activate` while already `active`; `/activate` while `unprovisioned` |
+| 411 | POST without `Content-Length`; sent by `web_server_base`, not the component |
+| 415 | a non-empty body sent as form data instead of JSON |
 | 429 | auth backoff or lockout; `Retry-After` gives the seconds left |
 | 503 | `/adv` or `/rec` while `unprovisioned`, `pending` or `locked`. Clevis treats this as a failure and falls back to the passphrase. |
 
@@ -476,6 +488,8 @@ It keeps the same flow, driven by environment variables:
 The test wipes, provisions fresh keys and, with `nvs`, activates them (with `TANG_PASSWORD` if set). It checks that the initrd unlocks the root through the device, then deactivates and checks that the next boot falls back to the passphrase prompt, now via a 503 from the device.
 
 ## Implementation order
+
+[esphome-implementation.md](esphome-implementation.md) breaks these steps into tasks, maps today's code to the new files, and lists what each step must show before the next one starts.
 
 1. Component skeleton: `__init__.py` schema, the state machine, and the `web_server_base` handler with the Tang endpoints ported from `handlers.h` (`ram` only).
 2. `verify_tang.py`: `--token` and the `ram` checks. Run it against the new firmware before continuing.
