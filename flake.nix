@@ -16,7 +16,20 @@
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system}.extend nixpkgs-esp-dev.overlays.default;
-        inherit (nixpkgs-unstable.legacyPackages.${system}) esphome;
+        # ESPHome builds with the esp-idf-full from this shell (IDF_PATH),
+        # because the toolchain it would download cannot run on NixOS. It runs
+        # idf.py with the first python on PATH, and its Nix wrapper puts its
+        # own Python there, which lacks ESP-IDF's packages. So take the
+        # wrapper's environment (esptool and the other Python packages), put
+        # ESP-IDF's Python first, and run the unwrapped script.
+        esphome = let
+          upstream = nixpkgs-unstable.legacyPackages.${system}.esphome;
+        in pkgs.writeShellScriptBin "esphome" ''
+          idf_python="''${IDF_PYTHON_ENV_PATH:?esphome needs the dev shell}/bin"
+          source <(grep -v '^exec ' ${upstream}/bin/esphome)
+          export PATH="$idf_python:$PATH"
+          exec -a "$0" ${upstream}/bin/.esphome-wrapped "$@"
+        '';
 
         # verify_tang.py with its Python dependencies pinned. A separate
         # command rather than a python3 in the dev shell, which would shadow
