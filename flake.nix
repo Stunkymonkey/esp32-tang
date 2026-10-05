@@ -6,12 +6,17 @@
     flake-utils.url = "github:numtide/flake-utils";
     #nixpkgs-esp-dev.url = "github:mirrexagon/nixpkgs-esp-dev";
     nixpkgs-esp-dev.url = "github:Stunkymonkey/nixpkgs-esp-dev/fix-remote-builders";
+    # ESPHome for the tang_server component. Separate from nixpkgs while the
+    # ESP-IDF build still exists, because esp-idf-full no longer evaluates on
+    # a current nixpkgs. Merged into nixpkgs once main/ is gone.
+    nixpkgs-unstable.url = "github:NixOS/nixpkgs/nixos-unstable";
   };
 
-  outputs = { self, nixpkgs, flake-utils, nixpkgs-esp-dev }:
+  outputs = { self, nixpkgs, flake-utils, nixpkgs-esp-dev, nixpkgs-unstable }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system}.extend nixpkgs-esp-dev.overlays.default;
+        inherit (nixpkgs-unstable.legacyPackages.${system}) esphome;
 
         # verify_tang.py with its Python dependencies pinned. A separate
         # command rather than a python3 in the dev shell, which would shadow
@@ -48,6 +53,7 @@
           buildInputs = with pkgs; [
             # ESP-IDF with full toolchain
             esp-idf-full
+            esphome
             jose
             clevis
             verify-tang

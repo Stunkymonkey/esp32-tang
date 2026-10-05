@@ -56,3 +56,7 @@ managed_components/
 *.jwk
 *.jwe
 *.json
+
+# ESPHome
+.esphome/
+example/secrets.yaml
