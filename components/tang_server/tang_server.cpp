@@ -17,6 +17,17 @@ namespace esphome::tang_server {
 
 static const char *const TAG = "tang_server";
 
+/// Whether NVS, where the keys are stored, is encrypted. Flash encryption
+/// alone leaves the nvs partition in plaintext; NVS encryption needs its own
+/// option and an nvs_keys partition, which flash encryption protects.
+static bool nvs_encrypted() {
+#ifdef CONFIG_NVS_ENCRYPTION
+  return esp_flash_encryption_enabled();
+#else
+  return false;
+#endif
+}
+
 const char *state_to_string(State state) {
   switch (state) {
     case State::UNPROVISIONED:
@@ -95,8 +106,10 @@ void TangServer::dump_config() {
     ESP_LOGCONFIG(TAG, "  Idle timeout: %" PRIu32 " s", this->idle_timeout_ms_ / 1000);
   ESP_LOGCONFIG(TAG,
                 "  Auth backoff: %u failures, then %" PRIu32 " s lockout\n"
-                "  Flash encryption: %s",
-                this->max_failures_, this->lockout_ms_ / 1000, YESNO(esp_flash_encryption_enabled()));
+                "  Flash encryption: %s\n"
+                "  NVS encryption: %s",
+                this->max_failures_, this->lockout_ms_ / 1000, YESNO(esp_flash_encryption_enabled()),
+                YESNO(nvs_encrypted()));
   {
     LockGuard guard(this->info_lock_);
     if (!this->last_error_.empty())
@@ -105,13 +118,13 @@ void TangServer::dump_config() {
 
   if (!this->has_admin_token())
     ESP_LOGW(TAG, "No admin_token: anyone on the network can provision, deactivate and wipe");
-  if (this->stores_plaintext_without_flash_encryption_())
-    ESP_LOGW(TAG, "Keys are stored in plaintext and flash encryption is off: anyone holding the device can read "
+  if (this->stores_plaintext_keys_in_plaintext_nvs_())
+    ESP_LOGW(TAG, "Keys are stored in plaintext and NVS is not encrypted: anyone holding the device can read "
                   "them. See the flash encryption guide in the README.");
 }
 
-bool TangServer::stores_plaintext_without_flash_encryption_() const {
-  return this->key_storage_ == KeyStorage::NVS && !this->require_password_ && !esp_flash_encryption_enabled();
+bool TangServer::stores_plaintext_keys_in_plaintext_nvs_() const {
+  return this->key_storage_ == KeyStorage::NVS && !this->require_password_ && !nvs_encrypted();
 }
 
 void TangServer::load_at_boot_() {
@@ -331,8 +344,8 @@ Result TangServer::activate_locked_(const std::string &password, bool has_passwo
         this->set_last_error_(error);
         return {500, "text/plain", error};
       }
-      if (this->stores_plaintext_without_flash_encryption_())
-        ESP_LOGW(TAG, "Keys stored in plaintext while flash encryption is off");
+      if (this->stores_plaintext_keys_in_plaintext_nvs_())
+        ESP_LOGW(TAG, "Keys stored in plaintext while NVS is not encrypted");
       ESP_LOGI(TAG, "Activated: keys stored");
       this->set_state_(State::ACTIVE);
       return Result::text(200, "Keys stored and active.");
@@ -411,6 +424,7 @@ Result TangServer::status(bool detailed) {
     doc["key_storage"] = this->key_storage_ == KeyStorage::RAM ? "ram" : "nvs";
     doc["require_password"] = this->require_password_;
     doc["flash_encryption"] = esp_flash_encryption_enabled();
+    doc["nvs_encryption"] = nvs_encrypted();
     doc["admin_token"] = this->has_admin_token();
 
     // Keys in RAM while active or pending, the stored ones while locked
@@ -636,8 +650,18 @@ bool TangServer::start_activation_(ActivateJob *job, const std::string *password
     job->password = *password;
   }
   // 8 KB, about twice what the httpd task has: PBKDF2, AES-GCM and the key
-  // checks run here. Same priority as the main loop, which keeps running.
-  if (xTaskCreate(&TangServer::activate_task_, "tang_activate", 8192, job, 1, nullptr) == pdPASS)
+  // checks run here. The httpd task's priority: at the main loop's, PBKDF2
+  // took twice as long. On dual-core chips it runs on core 0, so the main
+  // loop, which ESPHome pins to core 1, keeps running; PBKDF2 yields every
+  // 1000 iterations for the idle task.
+  static constexpr UBaseType_t PRIORITY = 5;
+#if CONFIG_FREERTOS_UNICORE
+  const BaseType_t core = tskNO_AFFINITY;
+#else
+  const BaseType_t core = 0;
+#endif
+  if (xTaskCreatePinnedToCore(&TangServer::activate_task_, "tang_activate", 8192, job, PRIORITY, nullptr, core) ==
+      pdPASS)
     return true;
   ESP_LOGE(TAG, "%s: cannot start the activation task", job->source);
   tang_server::wipe(job->password);

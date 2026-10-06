@@ -196,7 +196,7 @@ def check_detailed_status(state, keys):
     """The detailed /status: the configuration, the keys it lists (none, or
     the given ones) and the timers and counters."""
     status = get_status()
-    for field in ["state", "key_storage", "require_password", "flash_encryption", "admin_token", "keys",
+    for field in ["state", "key_storage", "require_password", "flash_encryption", "nvs_encryption", "admin_token", "keys",
                   "active_since_s", "deactivates_in_s", "idle_deactivates_in_s", "auth_failures",
                   "lockout_remaining_s", "counters"]:
         if field not in status:

@@ -166,7 +166,7 @@ class TangServer : public Component {
   /// Drops the keys from RAM and moves to locked or unprovisioned.
   void deactivate_(const char *reason);
   std::vector<KeyInfo> key_info_() const;
-  bool stores_plaintext_without_flash_encryption_() const;
+  bool stores_plaintext_keys_in_plaintext_nvs_() const;
 
   struct Backoff {
     uint8_t failures{0};

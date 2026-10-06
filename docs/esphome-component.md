@@ -115,7 +115,7 @@ The record starts with a fixed magic number and a format version, followed by th
   - **Additional authenticated data:** bytes 0–36 (the header), so the version and parameters cannot be changed without failing the tag check.
   - **Wrong password:** the GCM tag check fails. The device cannot tell a wrong password from a corrupted record, and treats both as an authentication failure.
   - **When it runs:** encryption runs once, on the first `/activate`, which also generates the salt and nonce on the device. Decryption runs on every later `/activate`. Both use mbedTLS. The password is never stored.
-  - **Cost:** on an ESP32, one PBKDF2 iteration takes about 100 µs, so the default of 20000 iterations makes every `/activate` take about 2 s. 100000 took 10 s. The derivation yields every 1000 iterations, so the task watchdog does not trip at any count. The count is stored in the record, so changing `pbkdf2_iterations` only affects keys stored afterwards.
+  - **Cost:** on an ESP32, one PBKDF2 iteration takes about 100 µs, so the default of 20000 iterations makes an activation take about 2 s through the action or the button. Through `/activate` it takes about 3.4 s: the extra time only appears while an HTTP request waits for the activation task, for a reason not found yet. 100000 iterations took 10 s. The derivation yields every 1000 iterations, so the task watchdog does not trip at any count. The count is stored in the record, so changing `pbkdf2_iterations` only affects keys stored afterwards.
 
 Both payloads are the same JSON `/provision` accepts, so every path goes through one parser with one set of checks. These checks are:
 - valid JWK;
@@ -149,14 +149,16 @@ This keeps secrets in RAM only while they are needed. Someone who can read the R
 
 ### Flash encryption
 
-Without ESP32 flash encryption, anyone holding the device can read NVS:
+Unless NVS is encrypted, anyone holding the device can read it:
 - **`nvs` setup:** this exposes the Tang keys directly.
 - **`nvs` + `require_password`:** it exposes only the encrypted record. The password still protects that record, though only as well as its strength holds up against offline guessing at the configured PBKDF2 cost.
 
-The component does not require flash encryption, because enabling it burns eFuses irreversibly and is not a first-class ESPHome feature. Instead:
-- The documentation explains how to enable flash encryption and NVS encryption through `sdkconfig_options`, and recommends both for the plain `nvs` setup.
-- If keys are stored in plaintext while flash encryption is off, the component logs a warning at boot and when it stores them.
-- The detailed `/status` reports `flash_encryption: false`.
+Flash encryption alone is not enough: ESP-IDF leaves the `nvs` partition out of it. NVS encryption is a separate option (`CONFIG_NVS_ENCRYPTION`). Its keys live in an `nvs_keys` partition, which flash encryption protects, so it needs flash encryption as well.
+
+The component does not require either, because enabling flash encryption burns eFuses irreversibly and is not a first-class ESPHome feature. Instead:
+- The README explains how to enable flash encryption and NVS encryption through `sdkconfig_options` and an extra partition, and recommends both for the plain `nvs` setup.
+- If keys are stored in plaintext while NVS is not encrypted, the component logs a warning at boot and when it stores them.
+- The detailed `/status` reports `flash_encryption` and `nvs_encryption`.
 
 Even with flash encryption, the plain `nvs` setup does not protect against someone who takes the device and simply powers it up: it serves the keys again. The captive portal and the fallback access point should be off on such a device, so that it cannot be pointed at another network.
 
@@ -304,6 +306,7 @@ With a valid token, or with no `admin_token` configured, it adds details. No pri
   "key_storage": "nvs",
   "require_password": true,
   "flash_encryption": false,
+  "nvs_encryption": false,
   "admin_token": true,
   "keys": [
     {"thp": {"S1": "…", "S256": "…"}, "use": "sign", "crv": "P-521"},

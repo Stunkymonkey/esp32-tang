@@ -225,6 +225,13 @@ Where the work differs from this plan or from the design as it stood before the 
 - **The examples gained entities**: the active binary sensor, the state and last error text sensors, and the buttons. `tang-nvs-password.yaml` also has the API action and the password text for unlocking from Home Assistant.
 - **`tests/tang_api.py` has subcommands now**: `run`, `entities`, `watch`, `press` and `text`.
 
+### Verification after step 7
+
+- **The warnings and `/status` look at NVS encryption**, not only at flash encryption. ESP-IDF leaves the `nvs` partition out of flash encryption, so the plain `nvs` setup's keys stay readable unless `CONFIG_NVS_ENCRYPTION` is on too. The warning used to say nothing once flash encryption was on. `/status` gains `nvs_encryption`. Design updated.
+- **The activation task runs at priority 5, pinned to core 0 on dual-core chips.** At priority 1, PBKDF2 at 20000 iterations took 4.4 s instead of step 4's 2.0 s. At priority 5 it takes 2.0 s from the action, but still about 3.4 s from `/activate`. The step 4 firmware, flashed again, still took 2.0 s on the same board, and the current code with `/activate` back in the httpd task took 2.0 s too. So the extra time only appears while an HTTP request waits for the task; neither core affinity nor polling instead of blocking removed it. Moving PBKDF2 back to the httpd task would leave about 600 bytes of stack, so it stays in the task. Design updated.
+- **OTA updates rolled back on the test board.** It browned out when booting new firmware, so the bootloader rolled back to the previous one, and its USB adapter dropped off at most boots. That is a power problem, not the component's; the timing experiments above were redone over USB.
+- **`restore_value: true` on the password text would save the password in flash.** The example and the design now warn against it.
+
 ## Risks to check early
 
 | Risk | Where it shows | Fallback |
