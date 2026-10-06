@@ -4,6 +4,8 @@ A [Tang](https://github.com/latchset/tang) server on an ESP32, as an [ESPHome](h
 
 The design and the reasons behind it are in [docs/esphome-component.md](docs/esphome-component.md).
 
+> **Developed with LLMs.** Large parts of this project, including the ESPHome component, its tests and its documentation, were written with the help of large language models (Anthropic's Claude) and tested on an ESP32. It is an experimental project that protects disk-encryption keys: read the code and the [design](docs/esphome-component.md) before you rely on it.
+
 ## Overview
 
 - **Tang protocol:** `/adv` and `/rec` as tangd serves them, with P-256 and P-521 keys and every thumbprint hash tangd accepts. Clevis works against it unchanged.
@@ -139,6 +141,33 @@ esp32:
 - **Development mode** still allows re-flashing with `esptool --encrypt`. Once everything works, switch to `CONFIG_SECURE_FLASH_ENCRYPTION_MODE_RELEASE`, which closes that door for good.
 
 Even with encryption, a device with plain `nvs` storage serves its keys to whoever powers it up. Turn off the captive portal and the fallback access point on such a device, so that it cannot be pointed at another network.
+
+## Debugging
+
+- **Logs:** `esphome logs example/<setup>.yaml` follows the device log over the network, or `--device /dev/ttyUSB0` over USB, which also shows crashes and the boot. At the default `DEBUG` level, the component logs every request with its status, every state change, and why a request was refused. It never logs keys, the token or the password.
+- **State:** `curl "${auth[@]}" http://<esp-ip>/status` shows the state, the keys' thumbprints, the timers, the backoff and the counters.
+- **Events:** [tests/tang-test.yaml](tests/tang-test.yaml) logs every trigger and has every entity; `tests/tang_api.py` watches them through the ESPHome API (see [Verification](#verification)).
+- **Updates that do not stick:** see the brownout note under [Configure and flash](#configure-and-flash).
+
+### Web UI, temporarily
+
+ESPHome's web UI shows the entities and the log in a browser, and has the deactivate, wipe and activate buttons. It is useful while setting up or debugging a device, but leave it out of a device in use:
+- it is plain HTTP, so its login travels in cleartext, and that login is enough to wipe the keys;
+- once a browser has the login, any web page it opens could send requests to the device, including a press on the wipe button;
+- everything it shows is also available through Home Assistant, over the encrypted ESPHome API.
+
+To enable it for a while, add this to the device's YAML and `web_password` to `secrets.yaml`:
+
+```yaml
+web_server:
+  port: 80
+  local: true            # serve the page from the device, not from the internet
+  auth:
+    username: admin
+    password: !secret web_password
+```
+
+The UI's login does not apply to the Tang endpoints, which Clevis must reach without one; they keep checking `admin_token`. Remove the block and flash again when you are done.
 
 ## Verification
 
