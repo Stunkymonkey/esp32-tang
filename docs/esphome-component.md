@@ -443,7 +443,7 @@ button:
 
 - `last_error` holds a short, safe message, never key material or the submitted password. It is only published when it changes, so Home Assistant keeps the time it happened.
 - `last_client_ip` is the IP of the last request the component handled, read from the request's socket.
-- The activate button reads the text entity and clears it right away on every press, whatever the result, so the password does not stay in Home Assistant's state. It wipes the entity's own copy before publishing it empty. Like `tang_server.activate`, it activates in the background; the result shows in `on_activate` and the entities. `password_id` is required with `require_password` and rejected without it, and the button needs `key_storage: nvs`; the build fails otherwise.
+- The activate button reads the text entity and clears it right away on every press, whatever the result, so the password does not stay in Home Assistant's state. It wipes the entity's own copy before publishing it empty. The text entity must not have `restore_value: true`, which would save the password in flash. Like `tang_server.activate`, it activates in the background; the result shows in `on_activate` and the entities. `password_id` is required with `require_password` and rejected without it, and the button needs `key_storage: nvs`; the build fails otherwise.
 - Entities show the latest state, not every change: they are published on the main loop, and changes within one loop iteration are published once. For example, `pending → active → locked` within a few milliseconds shows as `pending → locked`. The triggers report every change.
 
 ## Repository layout after the migration
