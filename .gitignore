@@ -43,16 +43,15 @@
 # direnv
 .direnv
 
-# gitignore template for esp-idf, the official development framework for ESP32
-# https://github.com/espressif/esp-idf
-build/
-sdkconfig
-sdkconfig.old
-
-managed_components/
+# clangd's index
 .cache/
 
 # Cryptographic files
 *.jwk
 *.jwe
 *.json
+
+# ESPHome
+.esphome/
+example/secrets.yaml
+tests/secrets.yaml

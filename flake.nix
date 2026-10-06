@@ -1,21 +1,39 @@
 {
-  description = "ESP32 Tang Server Development Environment";
+  description = "Tang server for ESP32 as an ESPHome component";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
     #nixpkgs-esp-dev.url = "github:mirrexagon/nixpkgs-esp-dev";
     nixpkgs-esp-dev.url = "github:Stunkymonkey/nixpkgs-esp-dev/fix-remote-builders";
+    # ESPHome for the tang_server component. Separate from nixpkgs, because
+    # esp-idf-full, which ESPHome builds with here, does not evaluate on a
+    # current nixpkgs.
+    nixpkgs-unstable.url = "github:NixOS/nixpkgs/nixos-unstable";
   };
 
-  outputs = { self, nixpkgs, flake-utils, nixpkgs-esp-dev }:
+  outputs = { self, nixpkgs, flake-utils, nixpkgs-esp-dev, nixpkgs-unstable }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system}.extend nixpkgs-esp-dev.overlays.default;
+        # ESPHome builds with the esp-idf-full from this shell (IDF_PATH),
+        # because the toolchain it would download cannot run on NixOS. It runs
+        # idf.py with the first python on PATH, and its Nix wrapper puts its
+        # own Python there, which lacks ESP-IDF's packages. So take the
+        # wrapper's environment (esptool and the other Python packages), put
+        # ESP-IDF's Python first, and run the unwrapped script.
+        esphome = let
+          upstream = nixpkgs-unstable.legacyPackages.${system}.esphome;
+        in pkgs.writeShellScriptBin "esphome" ''
+          idf_python="''${IDF_PYTHON_ENV_PATH:?esphome needs the dev shell}/bin"
+          source <(grep -v '^exec ' ${upstream}/bin/esphome)
+          export PATH="$idf_python:$PATH"
+          exec -a "$0" ${upstream}/bin/.esphome-wrapped "$@"
+        '';
 
         # verify_tang.py with its Python dependencies pinned. A separate
         # command rather than a python3 in the dev shell, which would shadow
-        # the one ESP-IDF brings.
+        # the one ESP-IDF brings and the esphome wrapper relies on.
         verify-tang = pkgs.writeShellApplication {
           name = "verify-tang";
           runtimeInputs = [
@@ -42,149 +60,86 @@
           meta.description = "Check a running ESP32 Tang server against the Tang protocol";
         };
 
+        # esphome config on the examples and the test configuration, with
+        # dummy secrets: catches schema errors without a device or a build.
+        # The upstream esphome is enough, as validation does not run idf.py.
+        checks.examples = pkgs.runCommand "tang-server-examples"
+          { nativeBuildInputs = [ nixpkgs-unstable.legacyPackages.${system}.esphome ]; } ''
+            export HOME=$TMPDIR
+            cp -r ${./components} components
+            mkdir example tests
+            cp ${./example}/*.yaml example/
+            cp ${./tests}/*.yaml tests/
+            for dir in example tests; do
+              cat > $dir/secrets.yaml <<EOF
+            wifi_ssid: ssid
+            wifi_password: password
+            api_encryption_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+            ota_password: ota
+            tang_admin_token: token
+            EOF
+            done
+            chmod -R u+w .
+            for config in example/tang-ram.yaml example/tang-nvs.yaml \
+                          example/tang-nvs-password.yaml tests/tang-test.yaml; do
+              echo "esphome config $config"
+              esphome config $config > /dev/null
+            done
+            touch $out
+          '';
+
+        # tang_crypto and key_store built for the host with sanitizers, and
+        # checked against Python's cryptography; see tests/host/run.sh.
+        checks.host-tests = pkgs.stdenv.mkDerivation {
+          name = "tang-server-host-tests";
+          src = pkgs.lib.fileset.toSource {
+            root = ./.;
+            fileset = pkgs.lib.fileset.unions [ ./components ./tests/host ./verify_tang.py ];
+          };
+          buildInputs = [ pkgs.mbedtls ];
+          nativeBuildInputs = [
+            (pkgs.python3.withPackages (ps: [ ps.cryptography ps.requests ]))
+          ];
+          # ESPHome pins this ArduinoJson for its json component.
+          ARDUINOJSON = pkgs.fetchurl {
+            url = "https://github.com/bblanchon/ArduinoJson/releases/download/v7.4.3/ArduinoJson-v7.4.3.h";
+            hash = "sha256-q1+7gmi4RrX0vFpf7hG7LJb3uLhG9b72VAr7apzHals=";
+          };
+          dontConfigure = true;
+          buildPhase = ''
+            OUT_DIR=$TMPDIR/host bash tests/host/run.sh
+          '';
+          installPhase = "touch $out";
+        };
+
         devShells.default = pkgs.mkShell {
           name = "esp32-tang-dev";
 
           buildInputs = with pkgs; [
-            # ESP-IDF with full toolchain
+            # ESPHome builds with this ESP-IDF; see the esphome wrapper above.
             esp-idf-full
+            esphome
+            cmake
+            ninja
+
+            # Keys, the tests and talking to the device
             jose
             clevis
             verify-tang
-
-            # Development tools
-            gnumake
-            cmake
-            ninja
-            ccache
-
-            # Serial communication tools
-            picocom
-            screen
-            minicom
-
-            # Development utilities
             curl
-            wget
-            unzip
-            file
-            which
             jq
+            picocom
 
-            # Text processing tools
-            gawk
-            gnused
-            gnugrep
-
-            # Optional development tools
             clang-tools
-            bear
-          ] ++ lib.optionals stdenv.isLinux [
-            # Linux-specific packages for USB device access
-            udev
-            libusb1
           ];
 
           shellHook = ''
-            echo "🚀 ESP32 Tang Server Development Environment"
-            echo "============================================="
-            echo
-            echo "ESP-IDF: $(idf.py --version 2>/dev/null || echo 'Ready')"
-            echo "Python: $(python3 --version)"
-            echo "CMake: $(cmake --version | head -1)"
-            echo
-            echo "Available commands:"
-            echo "  📦 idf.py build         - Build the project"
-            echo "  📡 idf.py flash         - Flash to device"
-            echo "  💻 idf.py monitor       - Serial monitor"
-            echo "  🔧 idf.py flash monitor - Flash and monitor"
-            echo "  ⚙️  idf.py menuconfig   - Configuration menu"
-            echo "  🎯 idf.py set-target    - Set target (esp32)"
-            echo
-            echo "Or use the Makefile shortcuts:"
-            echo "  make setup-target      - Set ESP32 target"
-            echo "  make build             - Build project"
-            echo "  make flash-monitor     - Flash and monitor"
-            echo "  make menuconfig        - Configuration"
-            echo
-            echo "Quick start:"
-            echo "  1. Set target:         make setup-target"
-            echo "  2. Configure:          make menuconfig"
-            echo "  3. Build:              make build"
-            echo "  4. Flash & Monitor:    make flash-monitor PORT=/dev/ttyUSB0"
-            echo
-
-            # Set up development environment
-            export IDF_TOOLS_PATH="$HOME/.espressif"
-            export CCACHE_DIR="$HOME/.ccache"
-
-            # Create necessary directories
-            mkdir -p "$IDF_TOOLS_PATH"
-            mkdir -p "$CCACHE_DIR"
-
-            # Check for serial devices
-            if ls /dev/ttyUSB* >/dev/null 2>&1; then
-              echo "📡 Found USB serial devices:"
-              ls -la /dev/ttyUSB* 2>/dev/null
-            elif ls /dev/ttyACM* >/dev/null 2>&1; then
-              echo "📡 Found ACM serial devices:"
-              ls -la /dev/ttyACM* 2>/dev/null
-            else
-              echo "📡 No serial devices found. Connect your ESP32 board."
-            fi
-
-            # Check serial permissions
-            if ! groups | grep -q dialout 2>/dev/null && ! groups | grep -q uucp 2>/dev/null; then
-              echo
-              echo "⚠️  Note: You may need to add your user to the 'dialout' group"
-              echo "   to access serial devices:"
-              echo "   sudo usermod -a -G dialout $USER"
-              echo "   Then log out and log back in."
-            fi
-
-            echo
-            echo "Ready for ESP32 development with Arduino support! 🎯"
-            echo
+            echo "ESP32 Tang server: esphome compile example/tang-nvs.yaml," \
+              "esphome run example/tang-nvs.yaml --device /dev/ttyUSB0"
           '';
-
-          # allow /dev/ access
-          extraDevPaths = [ "/dev/ttyUSB*" "/dev/ttyACM*" ];
-
-          # Environment variables
-          IDF_TOOLS_PATH = "$HOME/.espressif";
-          CCACHE_DIR = "$HOME/.ccache";
 
           # Prevent Python from creating __pycache__ directories
           PYTHONDONTWRITEBYTECODE = "1";
-
-          # Enable colored output
-          FORCE_COLOR = "1";
-
-          # Set locale to avoid issues
-          LANG = "C.UTF-8";
-          LC_ALL = "C.UTF-8";
-        };
-
-        devShells.minimal = pkgs.mkShell {
-          name = "esp32-tang-minimal";
-
-          buildInputs = with pkgs; [
-            esp-idf-full
-            picocom
-          ];
-
-          shellHook = ''
-            echo "⚡ ESP32 Tang Server (Minimal Environment)"
-            echo "========================================"
-            echo "Ready for ESP32 development!"
-            echo
-
-            export IDF_TOOLS_PATH="$HOME/.espressif"
-            export CCACHE_DIR="$HOME/.ccache"
-            mkdir -p "$CCACHE_DIR"
-          '';
-
-          extraDevPaths = [ "/dev/ttyUSB*" "/dev/ttyACM*" ];
         };
       }
     );

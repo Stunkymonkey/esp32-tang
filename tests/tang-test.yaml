@@ -1,0 +1,155 @@
+# Test firmware: require_password with short timers, a short lockout and
+# cheap PBKDF2, so verify_tang.py --check-timers and --check-lockout finish
+# in minutes. Every trigger logs a "TRIGGER" line, and the API actions run
+# the tang_server actions and log the conditions (see
+# tests/tang_api.py). It also has every entity and button. Not for real use.
+#
+# Uses the examples' secrets: ln -s ../example/secrets.yaml tests/secrets.yaml
+esphome:
+  name: tang-test
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+external_components:
+  - source:
+      type: local
+      path: ../components
+
+logger:
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+  actions:
+    - action: tang_activate
+      variables:
+        password: string
+      then:
+        - tang_server.activate:
+            password: !lambda "return password;"
+    - action: tang_deactivate
+      then:
+        - tang_server.deactivate:
+    - action: tang_wipe
+      then:
+        - tang_server.wipe:
+    - action: tang_conditions
+      then:
+        - if:
+            condition: tang_server.is_active
+            then:
+              - logger.log: "CONDITION is_active=1"
+            else:
+              - logger.log: "CONDITION is_active=0"
+        - if:
+            condition: tang_server.is_locked
+            then:
+              - logger.log: "CONDITION is_locked=1"
+            else:
+              - logger.log: "CONDITION is_locked=0"
+        - if:
+            condition: tang_server.is_provisioned
+            then:
+              - logger.log: "CONDITION is_provisioned=1"
+            else:
+              - logger.log: "CONDITION is_provisioned=0"
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+tang_server:
+  id: tang
+  key_storage: nvs
+  require_password: true
+  pbkdf2_iterations: 1000
+  admin_token: !secret tang_admin_token
+  max_active_time: 60s
+  idle_timeout: 20s
+  auth_backoff:
+    max_failures: 3
+    lockout: 30s
+
+  on_activate:
+    - logger.log:
+        format: "TRIGGER on_activate success=%d"
+        args: [success]
+  on_deactivate:
+    - logger.log:
+        format: "TRIGGER on_deactivate reason=%s"
+        args: [reason.c_str()]
+  on_state_change:
+    - logger.log:
+        format: "TRIGGER on_state_change state=%s"
+        args: [state.c_str()]
+  on_recovery:
+    - logger.log:
+        format: "TRIGGER on_recovery thp=%s success=%d"
+        args: [thp.c_str(), success]
+  on_adv:
+    - logger.log:
+        format: "TRIGGER on_adv thp=%s"
+        args: [thp.c_str()]
+  on_request:
+    - logger.log:
+        format: "TRIGGER on_request %s %s %d"
+        args: [method.c_str(), path.c_str(), status]
+  on_auth_failure:
+    - logger.log:
+        format: "TRIGGER on_auth_failure path=%s"
+        args: [path.c_str()]
+  on_rejected:
+    - logger.log:
+        format: "TRIGGER on_rejected path=%s reason=%s"
+        args: [path.c_str(), reason.c_str()]
+
+binary_sensor:
+  - platform: tang_server
+    active:
+      name: Tang active
+
+sensor:
+  - platform: tang_server
+    activation_count:
+      name: Tang activations
+    recovery_count:
+      name: Tang recoveries
+    adv_count:
+      name: Tang advertisements
+    auth_failure_count:
+      name: Tang auth failures
+
+text_sensor:
+  - platform: tang_server
+    state:
+      name: Tang state
+    last_path:
+      name: Tang last path
+    last_error:
+      name: Tang last error
+    last_client_ip:
+      name: Tang last client
+
+text:
+  - platform: template
+    id: tang_password
+    name: Tang key password
+    mode: password
+    optimistic: true
+
+button:
+  - platform: tang_server
+    deactivate:
+      name: Tang deactivate
+    wipe:
+      name: Tang wipe
+    activate:
+      name: Tang activate
+      password_id: tang_password
