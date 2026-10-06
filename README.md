@@ -218,9 +218,13 @@ Leave out `TANG_TOKEN` if the device has no `admin_token`, and `TANG_PASSWORD` u
 The driver writes VM disk images into the current directory, so run it from a scratch directory. To step through the test interactively, build `.#luks-clevis-test.driverInteractive` instead, then call `test_script()` or drive `machine` from the Python prompt.
 
 
-### Configuration check
+### Without a device: `nix flake check` and CI
 
-`nix flake check` runs `esphome config` on the three examples and `tests/tang-test.yaml`, with dummy secrets. It needs no device.
+`nix flake check` runs two checks that need no device:
+- `examples`: `esphome config` on the three examples and `tests/tang-test.yaml`, with dummy secrets;
+- `host-tests`: [tests/host/run.sh](tests/host/run.sh) builds `tang_crypto` and `key_store` for Linux, with AddressSanitizer and UndefinedBehaviorSanitizer, and checks them against Python's `cryptography` and `hashlib`: `/adv` signatures, `/rec` exchanges, thumbprints, key parsing, PBKDF2 and the stored record's format, decrypted independently.
+
+GitHub Actions ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs `nix flake check` and builds the firmware for every example and the test configuration, on every pull request and on `main`. The checks against a device above stay manual: run them before merging changes to the component.
 
 ## Useful Links
 

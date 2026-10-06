@@ -88,6 +88,30 @@
             touch $out
           '';
 
+        # tang_crypto and key_store built for the host with sanitizers, and
+        # checked against Python's cryptography; see tests/host/run.sh.
+        checks.host-tests = pkgs.stdenv.mkDerivation {
+          name = "tang-server-host-tests";
+          src = pkgs.lib.fileset.toSource {
+            root = ./.;
+            fileset = pkgs.lib.fileset.unions [ ./components ./tests/host ./verify_tang.py ];
+          };
+          buildInputs = [ pkgs.mbedtls ];
+          nativeBuildInputs = [
+            (pkgs.python3.withPackages (ps: [ ps.cryptography ps.requests ]))
+          ];
+          # ESPHome pins this ArduinoJson for its json component.
+          ARDUINOJSON = pkgs.fetchurl {
+            url = "https://github.com/bblanchon/ArduinoJson/releases/download/v7.4.3/ArduinoJson-v7.4.3.h";
+            hash = "sha256-q1+7gmi4RrX0vFpf7hG7LJb3uLhG9b72VAr7apzHals=";
+          };
+          dontConfigure = true;
+          buildPhase = ''
+            OUT_DIR=$TMPDIR/host bash tests/host/run.sh
+          '';
+          installPhase = "touch $out";
+        };
+
         devShells.default = pkgs.mkShell {
           name = "esp32-tang-dev";
 
