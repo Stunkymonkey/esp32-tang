@@ -6,9 +6,14 @@
 # check:
 #
 #   nix build .#luks-clevis-test.driver
-#   TANG_URL=http://<esp32-ip> ./result/bin/nixos-test-driver
+#   TANG_URL=http://<esp32-ip> TANG_TOKEN=<admin_token> ./result/bin/nixos-test-driver
 #
-# The test replaces the keys on the ESP32 and deactivates it at the end.
+# TANG_TOKEN is the device's admin_token; leave it out if none is set. Set
+# TANG_PASSWORD for a require_password device; the test stores the keys
+# with it.
+#
+# The test wipes the ESP32, provisions fresh keys and deactivates it at the
+# end.
 { lib, ... }:
 {
   name = "esp32-tang-luks-clevis";
@@ -74,24 +79,42 @@
     tang_url = os.environ.get("TANG_URL", "").rstrip("/")
     if not tang_url:
         raise Exception("Set TANG_URL to the ESP32, e.g. TANG_URL=http://192.168.178.63")
+    token = os.environ.get("TANG_TOKEN", "")
+    password = os.environ.get("TANG_PASSWORD", "")
+    auth = f"-H 'Authorization: Bearer {token}'" if token else ""
+
+    def post(path, body='""'):
+        # --json sets Content-Type, which the device needs for a body, and
+        # Content-Length, which it needs even for an empty one.
+        return machine.succeed(f"curl -fsS {auth} --json {body} {tang_url}{path}")
 
     machine.wait_for_unit("multi-user.target")
     machine.systemctl("start network-online.target")
     machine.wait_for_unit("network-online.target")
 
     with subtest("Provision the ESP32 with fresh keys"):
-        machine.succeed(f"curl -fsS -X POST {tang_url}/deactivate")
+        post("/wipe")
         machine.succeed(
             "jose jwk gen -i '{\"alg\":\"ES512\"}' -o /tmp/sig.jwk",
             "jose jwk gen -i '{\"alg\":\"ECMR\"}' -o /tmp/exc.jwk",
             "jq -n --slurpfile s /tmp/sig.jwk --slurpfile e /tmp/exc.jwk"
             " '{keys: [$s[0], $e[0]]}' > /tmp/provision.json",
         )
-        machine.succeed(
-            "curl -fsS -X POST -H 'Content-Type: application/json'"
-            f" --data @/tmp/provision.json {tang_url}/provision"
-        )
+        post("/provision", "@/tmp/provision.json")
         thp = machine.succeed("jose jwk thp -i /tmp/sig.jwk").strip()
+
+        # With key_storage: nvs, the keys are served once /activate stores
+        # them, encrypted with the password if the device requires one.
+        status = json.loads(machine.succeed(f"curl -fsS {auth} {tang_url}/status"))
+        if status.get("key_storage") == "nvs":
+            if password:
+                machine.succeed(
+                    f"jq -n --arg p {json.dumps(password)} '{{password: $p}}' > /tmp/activate.json"
+                )
+                post("/activate", "@/tmp/activate.json")
+            else:
+                post("/activate")
+        assert json.loads(machine.succeed(f"curl -fsS {tang_url}/status"))["state"] == "active"
 
     with subtest("Bind the encrypted root to the ESP32"):
         machine.succeed("echo -n supersecret | cryptsetup luksFormat -q --iter-time=1 /dev/vdb -")
@@ -117,7 +140,8 @@
         machine.succeed("echo persisted > /marker && sync")
 
     with subtest("Without keys on the ESP32 the initrd falls back to the passphrase"):
-        machine.succeed(f"curl -fsS -X POST {tang_url}/deactivate")
+        # /adv and /rec now answer 503, which clevis treats as a failure.
+        post("/deactivate")
         machine.crash()
         machine.start()
         machine.wait_for_console_text("Please enter")

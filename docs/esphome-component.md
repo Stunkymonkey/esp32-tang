@@ -1,8 +1,8 @@
 # Design: ESPHome `tang_server` component
 
-Status: draft, agreed in planning, not implemented yet.
+Status: implemented; see [Implementation history](#implementation-history) for how it was built and where it differs from the first draft.
 
-This document describes how the ESP-IDF firmware in `main/` becomes an ESPHome external component. It covers configuration, HTTP endpoints, automations and entities, and how the tests move over. The Tang protocol code (JWK parsing, `/adv` signing, `/rec` exchange) is carried over. What changes is everything around it: how keys get onto the device, whether they survive a reboot, when they are usable, and how Home Assistant sees and controls that.
+This document describes the ESPHome external component that replaced the standalone ESP-IDF firmware. It covers configuration, HTTP endpoints, automations and entities, and the tests. The Tang protocol code (JWK parsing, `/adv` signing, `/rec` exchange) came over from the ESP-IDF firmware. What changed is everything around it: how keys get onto the device, whether they survive a reboot, when they are usable, and how Home Assistant sees and controls that.
 
 ## Scope
 
@@ -247,7 +247,7 @@ All endpoints are at the root, so the Clevis URL is `http://<device>`. The paths
 
 ### Thumbprints
 
-Like tangd, `/adv/<thp>` and `/rec/<thp>` accept a key's RFC 7638 thumbprint in any hash tangd supports: S1, S224, S256, S384 and S512 (`TANG_THP_ALGS` in today's `helpers.h`). Clevis uses jose's default, S1. Only S1 would be enough for Clevis, but checking all of them keeps the device interchangeable with tangd. `/status` reports S1 and S256 for each key.
+Like tangd, `/adv/<thp>` and `/rec/<thp>` accept a key's RFC 7638 thumbprint in any hash tangd supports: S1, S224, S256, S384 and S512 (`TANG_THP_ALGS` in `tang_crypto`). Clevis uses jose's default, S1. Only S1 would be enough for Clevis, but checking all of them keeps the device interchangeable with tangd. `/status` reports S1 and S256 for each key.
 
 ### Request handling
 
@@ -449,7 +449,7 @@ button:
 - The activate button reads the text entity and clears it right away on every press, whatever the result, so the password does not stay in Home Assistant's state. It wipes the entity's own copy before publishing it empty. The text entity must not have `restore_value: true`, which would save the password in flash. Like `tang_server.activate`, it activates in the background; the result shows in `on_activate` and the entities. `password_id` is required with `require_password` and rejected without it, and the button needs `key_storage: nvs`; the build fails otherwise.
 - Entities show the latest state, not every change: they are published on the main loop, and changes within one loop iteration are published once. For example, `pending → active → locked` within a few milliseconds shows as `pending → locked`. The triggers report every change.
 
-## Repository layout after the migration
+## Repository layout
 
 ```
 components/tang_server/
@@ -458,23 +458,26 @@ components/tang_server/
   sensor.py
   text_sensor.py
   button.py
-  tang_server.h/.cpp   component: state machine, timers, backoff, entities
+  tang_server.h/.cpp   component: state machine, timers, backoff, activation task, entities
   http_handler.h/.cpp  AsyncWebHandler registered on web_server_base
-  tang_crypto.h/.cpp   JWK parsing, adv signing, ECMR exchange (from helpers.h)
+  tang_crypto.h/.cpp   JWK parsing, adv signing, ECMR exchange
   key_store.h/.cpp     NVS record, PBKDF2 + AES-GCM encryption and decryption
   automation.h         trigger, action and condition classes
+  tang_button.h        button classes
 example/
   tang-ram.yaml
   tang-nvs.yaml
   tang-nvs-password.yaml
   secrets.yaml.example
 tests/
-  luks-clevis.nix
+  luks-clevis.nix      NixOS VM test: LUKS root unlocked by Clevis through the device
+  tang-test.yaml       test firmware: short timers, every trigger and entity
+  tang_api.py          drives tang-test.yaml through the ESPHome API
 verify_tang.py
 docs/esphome-component.md
 ```
 
-`main/`, `CMakeLists.txt`, `Makefile`, `sdkconfig.defaults` and `dependencies.lock` are deleted. The flake's dev shell swaps the ESP-IDF toolchain for `esphome`, and gains a check that runs `esphome config` on all three example files.
+The standalone ESP-IDF build (`main/`, `CMakeLists.txt`, `Makefile`, `sdkconfig.defaults`, `dependencies.lock`) is gone. The flake's dev shell has ESPHome, and its `checks.examples` runs `esphome config` on the three examples and `tests/tang-test.yaml`.
 
 ## Tests
 
@@ -517,22 +520,129 @@ Two checks are opt-in, because they need time or a person:
 
 ### `tests/luks-clevis.nix`
 
-It keeps the same flow, driven by environment variables:
-- `TANG_URL` (as today)
-- `TANG_TOKEN`
+It is driven by environment variables:
+- `TANG_URL`
+- `TANG_TOKEN`, the device's `admin_token` if one is set
 - `TANG_PASSWORD`, only for a `require_password` device
 
 The test wipes, provisions fresh keys and, with `nvs`, activates them (with `TANG_PASSWORD` if set). It checks that the initrd unlocks the root through the device, then deactivates and checks that the next boot falls back to the passphrase prompt, now via a 503 from the device.
 
-## Implementation order
+## Implementation history
 
-[esphome-implementation.md](esphome-implementation.md) breaks these steps into tasks, maps today's code to the new files, and lists what each step must show before the next one starts.
+The component was built in eight steps, each checked on an ESP32 (ESP-IDF 5.5.2, ESPHome 2026.8.0) with `verify_tang.py` before the next one started:
 
-1. Component skeleton: `__init__.py` schema, the state machine, and the `web_server_base` handler with the Tang endpoints ported from `handlers.h` (`ram` only).
-2. `verify_tang.py`: `--token` and the `ram` checks. Run it against the new firmware before continuing.
+1. Component skeleton: `__init__.py` schema, the state machine, and the `web_server_base` handler with the Tang endpoints ported from the ESP-IDF firmware's `handlers.h` (`ram` only).
+2. `verify_tang.py`: `--token` and the `ram` checks.
 3. `nvs` storage without a password: the `pending` state, storing on the first `/activate`, activation at boot, `/wipe`, and the `nvs` checks.
 4. `require_password`: PBKDF2 + AES-GCM in `key_store`, and the password checks.
 5. Auth backoff, auto-deactivation, `/status` and the flash encryption warning.
 6. Triggers, actions and conditions.
 7. Entities and buttons.
 8. Port `luks-clevis.nix`, update the flake and README (including the flash encryption guide), and delete the ESP-IDF build.
+
+### Measurements
+
+On an ESP32 at 240 MHz:
+- **httpd stack:** the httpd task has 4352 bytes. The deepest request is a rejected `/provision`, which leaves about 820 bytes unused. Activations run in their own task with 8 KB.
+- **PBKDF2:** about 100 µs per iteration: 2 s at the default 20000 iterations through the action or the button, about 3.4 s through `/activate` (see the verification notes below), 10 s at 100000.
+- **Timers:** `idle_timeout: 20s` fired after 20.5 s and `max_active_time: 60s` after 60.4 s.
+- **Stored record:** 697 bytes in plaintext for two P-521 keys, 764 bytes encrypted.
+
+### Differences from the original design
+
+Where the implementation differs from this design as it was first agreed, or from the plan that went with it, the difference is listed here with the reason. Where the design changed, the sections above already describe the result; this list says what it said before.
+
+#### Build environment
+
+- **ESPHome does not build through PlatformIO, and not with its own ESP-IDF.**
+  - **Plan:** ESPHome builds with ESP-IDF 5.5.5, downloaded through PlatformIO into `~/.platformio`. Step 8 drops `esp-idf-full` and `nixpkgs-esp-dev`.
+  - **Done:** ESPHome 2026.8 calls `idf.py` itself. The toolchain it downloads into `~/.cache/esphome/idf` cannot run on NixOS, so it builds with `esp-idf-full` 5.5.2 from the dev shell (`IDF_PATH`). The shell's `esphome` is a wrapper: it takes the environment of ESPHome's Nix wrapper (which also brings `esptool`), puts ESP-IDF's Python first on `PATH` and runs the unwrapped script. Without this, `idf.py` runs with a Python that lacks ESP-IDF's packages.
+  - **Consequence:** the dev shell keeps `esp-idf-full`, and the flake keeps its second nixpkgs input, because `esp-idf-full` does not evaluate on a current nixpkgs. The README describes the build environment.
+- **The dev shell leaks a `PYTHONPATH`.** A shell entered before the wrapper existed still carries ESPHome's Python 3.14 packages, and `verify-tang` (Python 3.13) then fails to import `cryptography`. Re-entering the shell fixes it.
+
+#### Step 1
+
+- **SHA-384/512 are requested from ESPHome** (`esp32.require_mbedtls_sha512()`). Not in the plan. ESPHome turns them off on ESP-IDF 6 unless a component asks, and ES512 (P-521) and the S384/S512 thumbprints need them.
+- **One body buffer instead of a map keyed by the request pointer.** The httpd task serves one request at a time, so a map is not needed. A request whose body cannot be read to the end never reaches `handleRequest()`; the next request resets its partial body. Design updated.
+- **405 for a component path with the wrong method**, with `Allow`. The design had no status for it; without it, such requests fell through to other handlers or got no answer. Design updated.
+- **401 carries `WWW-Authenticate: Bearer`.** Not in the design.
+- **No CORS header.** The component sends its own responses, so it does not get the `Access-Control-Allow-Origin: *` that `web_server_base` adds to responses sent through `send()`. Pages on other origins cannot read its answers.
+- **The parser is stricter than the ESP-IDF firmware's `handlers.h`** beyond the planned whole-payload rejection: `kty` must be `EC`. Thumbprints are computed once per key at load instead of on every request.
+- **The URL buffer (513 bytes) is resolved in a separate, non-inlined function**, so it is off the httpd stack while the crypto runs.
+- **The stack high-water mark is logged after every operation**, not only after `/adv` and `/rec`. The deepest path turned out to be `/provision`.
+
+#### Step 2
+
+- **The `/status` details checks have nothing to check yet.** `/status` returns only the state until step 5. The checks pass now and become meaningful with the detailed view.
+- **Each suite ends with `/deactivate` and then `/wipe`.** In step 2, P-256 ended with `/deactivate` and P-521 with `/wipe`; step 3 changed both to do both, so the `nvs` suites start clean.
+
+#### Step 3
+
+- **The ESP-IDF NVS API instead of ESPHome's preferences.**
+  - **Plan:** `global_preferences->make_preference<>()` with a fixed hash, a fixed-size struct, `sync()` after the first `/activate` and after `/wipe`, and writes handed to the main loop with `defer()`.
+  - **Done:** one NVS blob, key `keys`, in the namespace `tang_server`, written with `nvs_set_blob()` and `nvs_commit()` from the httpd task, and erased with `nvs_erase_key()`.
+  - **Why:** preferences keep each write in a heap buffer until the next sync and free it without wiping, and comparing with the stored value reads it into another unwiped buffer. They cannot erase a record, and they may only be used from the main loop. NVS is thread-safe, so `/activate` answers only once the record is committed.
+  - Design updated: [Stored key format](#stored-key-format) and the "Two threads" note.
+- **The record has a variable size**, not a fixed-size struct: magic `TANG`, format version, payload.
+- **The payload is written from the parsed keys** (`kty`, `crv`, `kid`, `key_ops`, `d`, `x`, `y`), not copied from the `/provision` body. It is still the JSON `/provision` accepts, so one parser checks both. This keeps the record small and free of anything else the client sent.
+- **The reboot check was a reset**, through the serial adapter's EN line and later the EN button, not a power cycle. Both clear RAM and keep NVS.
+
+#### Step 4
+
+- **The default PBKDF2 iteration count is 20000, not 100000.** This is the fallback the plan named: 100000 iterations took 10 s per `/activate` on an ESP32 (about 100 µs each), 20000 take 2 s. The maximum is 10000000. Design updated.
+- **PBKDF2 is its own loop over mbedTLS's HMAC**, verified against Python's `hashlib`. `mbedtls_pkcs5_pbkdf2_hmac_ext()` runs all iterations in one call and cannot yield; the loop yields every 1000 iterations.
+- **The encrypted record starts with the magic number and has format version `2`.** The design had format version `1` at offset 0 and additional data over bytes 0–32. Now both formats share the 5-byte header, the version tells them apart, and the additional data is bytes 0–36. Design updated.
+- **The GCM context is on the heap.** It is about 800 bytes, which the httpd stack does not have to spare.
+- **`/activate` answers 409 for `active` and `unprovisioned` before it checks the password.** Before, a request without a password on an `unprovisioned` device got 400; the state is the more basic answer.
+- **A record that does not match the configuration is ignored at boot**: plaintext with `require_password`, or encrypted without it. The device boots `unprovisioned` with `last_error` set, and the record stays. The design did not cover this case. Design updated.
+- **The DRBG is seeded in `setup()`.** Its first use, gathering entropy, was the deepest call on the httpd stack.
+- **`verify_tang.py --password` implies `--storage nvs`.**
+
+#### Step 5
+
+- **One backoff counter per secret**, the token and the key password, instead of one for the whole device. With one counter, someone holding the token could reset it with any valid request between password guesses. Design updated.
+- **Backoff applies only to requests that check a secret.** The design said "every protected endpoint". Without `admin_token`, the management endpoints check nothing, so they are not refused; the public `/status`, `/adv` and `/rec` never are. Design updated.
+- **Refusals are not failures**, so waiting is always enough to get through. They still count in the `auth_failure` counter, and in step 6 they fire `on_auth_failure`, as the design says.
+- **`/status` reports the timers as `null`** while the server is not active or a timer is not configured. The design did not say. Design updated.
+- **While `locked` without a password, `/status` lists the stored keys as they were when deactivated.** Reading and checking the record on every `/status` would run the key-pair check on the httpd stack. Design updated.
+- **`loop()` uses `try_lock()`** and skips a round while `/activate` holds the lock, as planned in the risk table. Without timers, `loop()` is disabled.
+- **The warnings are in `dump_config()`**, so they show at boot and whenever a log client connects. The plaintext warning also shows when keys are stored.
+- **The test YAML is `tests/tang-test.yaml`.** It reads the examples' secrets through a `tests/secrets.yaml` symlink, which is git-ignored.
+- **`verify_tang.py` waits out the backoff** after each failure it causes on purpose, and before it starts, so a lockout left by an earlier run does not fail the next one.
+
+#### Step 6
+
+- **Activations run in their own task**, from HTTP and from the action. The plan's fallback for the stack, a crypto task, applied to `/activate` only: the triggers added two call frames to its path, and the low point fell to 604 bytes. `/activate` now waits for the task, so the httpd stack holds no PBKDF2, AES-GCM or key check; the low point is 840 bytes again. `/provision`, `/adv` and `/rec` stay on the httpd stack. Design updated.
+- **`tang_server.activate` returns at once.** Running PBKDF2 on the main loop would block it for 2 s, or 10 s at 100000 iterations, close to the loop watchdog. Its result shows in `on_activate`. Design updated.
+- **One activation at a time.** A second `/activate` gets 409 while one runs; a second action logs a warning. Not in the design. Design updated.
+- **The password checks of `tang_server.activate` run at build time**, in its code generation, because an action's schema cannot see the component's configuration. Design updated.
+- **`on_activate` fires for 400 and 409 as well**: every attempt that passed the token check and the backoff, as the design says, including those that fail before the keys are touched. The design now says so explicitly.
+- **`on_state_change` at boot fires once, with the state after loading the stored keys.** The changes while loading are not reported on their own. Design updated.
+- **`on_auth_failure` from the action has the path `tang_server.activate`.** The design did not say. Design updated.
+- **`tests/tang-short-timers.yaml` became `tests/tang-test.yaml`**, with a log line for every trigger and API actions for the actions and conditions. `tests/tang_api.py` calls those actions through the ESPHome API, as Home Assistant would.
+
+#### Step 7
+
+- **Checked through the ESPHome native API, not in Home Assistant.** No Home Assistant instance was at hand. `tests/tang_api.py` uses `aioesphomeapi`, the library Home Assistant's ESPHome integration is built on, to list the entities, watch their states, press the buttons and set the password text.
+- **Entities show the latest state, not every change.** Publishing goes through one named `defer()`, so changes within one loop iteration are published once, and a state that lasts only milliseconds can be skipped. The triggers still report every change. Design updated.
+- **The counters are atomics, and `last_error` has its own mutex**, so the main loop can publish them while an activation holds the lock for seconds.
+- **The activate button clears the text right away on the press**, not after the attempt: the activation runs in the background, and the password is copied before. It also wipes the text entity's own copy of the string. Design updated.
+- **The `password_id` check runs at build time**, like the action's password check. Design updated.
+- **`last_error` was not exercised in this step's run**, because nothing in it fails in a way that sets it. Step 4 showed a boot error in the log and `dump_config()`; the entity uses the same value.
+- **The examples gained entities**: the active binary sensor, the state and last error text sensors, and the buttons. `tang-nvs-password.yaml` also has the API action and the password text for unlocking from Home Assistant.
+- **`tests/tang_api.py` has subcommands now**: `run`, `entities`, `watch`, `press` and `text`.
+
+#### Verification after step 7
+
+- **The warnings and `/status` look at NVS encryption**, not only at flash encryption. ESP-IDF leaves the `nvs` partition out of flash encryption, so the plain `nvs` setup's keys stay readable unless `CONFIG_NVS_ENCRYPTION` is on too. The warning used to say nothing once flash encryption was on. `/status` gains `nvs_encryption`. Design updated.
+- **The activation task runs at priority 5, pinned to core 0 on dual-core chips.** At priority 1, PBKDF2 at 20000 iterations took 4.4 s instead of step 4's 2.0 s. At priority 5 it takes 2.0 s from the action, but still about 3.4 s from `/activate`. The step 4 firmware, flashed again, still took 2.0 s on the same board, and the current code with `/activate` back in the httpd task took 2.0 s too. So the extra time only appears while an HTTP request waits for the task; neither core affinity nor polling instead of blocking removed it. Moving PBKDF2 back to the httpd task would leave about 600 bytes of stack, so it stays in the task. Design updated.
+- **OTA updates rolled back on the test board.** It browned out when booting new firmware, so the bootloader rolled back to the previous one, and its USB adapter dropped off at most boots. That is a power problem, not the component's; the timing experiments above were redone over USB.
+- **`restore_value: true` on the password text would save the password in flash.** The example and the design now warn against it.
+
+#### Step 8
+
+- **`tests/luks-clevis.nix` sends empty POSTs with `curl --json ''`**, not `-d ''`, and every body with `--json`. It reads `key_storage` from the detailed `/status` to decide whether to activate, so it needs no variable for it.
+- **The flake check also validates `tests/tang-test.yaml`**, besides the three examples. It runs ESPHome's own wrapper, which needs no ESP-IDF for validation.
+- **`admin_token` and the action's `password` are marked `cv.sensitive()`**, so `esphome config` redacts them after ESPHome 2026.12 drops its name heuristic.
+- **The flash encryption guide in the README is untested on hardware.** Enabling flash encryption burns eFuses irreversibly; it was written from the ESP-IDF 5.5 sources and documentation.
+- **The implementation plan was deleted**, as planned; its deviations and measurements moved here.

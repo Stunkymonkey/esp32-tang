@@ -88,7 +88,10 @@ CONFIG_SCHEMA = cv.All(
             cv.Required(CONF_KEY_STORAGE): cv.one_of(*KEY_STORAGES, lower=True),
             cv.Optional(CONF_REQUIRE_PASSWORD): cv.boolean,
             cv.Optional(CONF_PBKDF2_ITERATIONS): cv.int_range(min=1, max=10000000),
-            cv.Optional(CONF_ADMIN_TOKEN): cv.All(cv.string_strict, cv.Length(min=1)),
+            # Redacted in `esphome config` output and masked by frontends.
+            cv.Optional(CONF_ADMIN_TOKEN): cv.sensitive(
+                cv.All(cv.string_strict, cv.Length(min=1))
+            ),
             cv.Optional(CONF_MAX_ACTIVE_TIME): cv.positive_time_period_milliseconds,
             cv.Optional(CONF_IDLE_TIMEOUT): cv.positive_time_period_milliseconds,
             cv.Optional(CONF_AUTH_BACKOFF, default={}): cv.Schema(
@@ -172,7 +175,7 @@ def check_activate_password(has_password, what="tang_server.activate", option="a
     cv.Schema(
         {
             cv.GenerateID(): cv.use_id(TangServer),
-            cv.Optional(CONF_PASSWORD): cv.templatable(cv.string),
+            cv.Optional(CONF_PASSWORD): cv.templatable(cv.sensitive(cv.string)),
         }
     ),
     # Returns at once; the activation continues in its own task.
