@@ -1,0 +1,66 @@
+# Everything that can be checked without an ESP32. The checks that need
+# one (verify_tang.py, tests/luks-clevis.nix) stay manual; see the README.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  nix:
+    name: nix flake check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: cachix/install-nix-action@v31
+      # checks.examples: esphome config on the examples and the test
+      # configuration. checks.host-tests: tang_crypto and key_store on the
+      # host, with sanitizers, against Python's cryptography.
+      - run: nix flake check -L
+
+  firmware:
+    name: build ${{ matrix.config }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - example/tang-ram.yaml
+          - example/tang-nvs.yaml
+          - example/tang-nvs-password.yaml
+          - tests/tang-test.yaml
+    env:
+      # The version the flake pins; bump both together.
+      ESPHOME_VERSION: "2026.8.0"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - run: pip install "esphome==$ESPHOME_VERSION"
+      # ESPHome downloads ESP-IDF and its toolchain on the first build.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/esphome
+          key: esphome-${{ env.ESPHOME_VERSION }}-${{ runner.os }}
+      - name: Dummy secrets
+        run: |
+          for dir in example tests; do
+            cat > "$dir/secrets.yaml" <<SECRETS
+          wifi_ssid: ssid
+          wifi_password: password
+          api_encryption_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+          ota_password: ota
+          tang_admin_token: token
+          SECRETS
+          done
+      - run: esphome compile ${{ matrix.config }}
